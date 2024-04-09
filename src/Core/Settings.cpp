@@ -6723,7 +6723,7 @@ Approximate probability of failure for a keeper request during insert. Valid val
 0 - random seed, otherwise the setting value
 )", 0) \
     DECLARE(UInt64, bernoulli_sample_seed, 1, R"(
-Seed for Bernoulli sampling. 0 means random, nonzero means deterministic.
+Seed for the experimental Bernoulli sampling path (`allow_experimental_bernoulli_sample`). `0` re-seeds randomly per query; any nonzero value is deterministic per part. Has no effect on tables with a `SAMPLE BY` key.
 )", 0) \
     DECLARE(Bool, force_aggregation_in_order, false, R"(
 The setting is used by the server itself to support distributed queries. Do not change it manually, because it will break normal operations. (Forces use of aggregation in order on remote nodes during distributed aggregation).
@@ -7608,7 +7608,7 @@ If it is set to true, and the conditions of `join_to_sort_minimum_perkey_rows` a
 Enable experimental lazy type hints for JSON type. This feature allows optimizing JSON type conversions by deferring type hint evaluation.
 )", EXPERIMENTAL) \
     DECLARE(Bool, allow_experimental_bernoulli_sample, false, R"(
-Allow using Bernoulli sampling when SAMPLE is applied to a MergeTree table without a SAMPLE BY key. When enabled, each row is independently selected with the given probability instead of throwing an error.
+Allow the `SAMPLE` clause on `MergeTree`-family tables created without a `SAMPLE BY` key. Each row is independently kept with the requested probability. `SAMPLE k OFFSET m` is still rejected. See [SAMPLE Clause](/sql-reference/statements/select/sample#bernoulli-sampling).
 )", EXPERIMENTAL) \
      \
     DECLARE_WITH_ALIAS(Bool, allow_statistics_optimize, true, R"(
