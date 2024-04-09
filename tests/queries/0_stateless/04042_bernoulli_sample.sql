@@ -161,7 +161,64 @@ DROP TABLE t_bernoulli_child;
 SELECT 'prewhere with bernoulli';
 SELECT count() FROM t_bernoulli SAMPLE 0.1 PREWHERE x >= 50000 SETTINGS bernoulli_sample_seed = 42;
 
+SELECT 'sample by key dominates the experimental flag';
+-- A table with a SAMPLE BY key must always use the native sampling path,
+-- regardless of allow_experimental_bernoulli_sample. The Bernoulli branch in
+-- MergeTreeDataSelectExecutor::getSampling is only entered when !hasSamplingKey().
+DROP TABLE IF EXISTS t_bernoulli_sbk;
+CREATE TABLE t_bernoulli_sbk (x UInt64) ENGINE = MergeTree ORDER BY (cityHash64(x), x) SAMPLE BY cityHash64(x);
+INSERT INTO t_bernoulli_sbk SELECT number FROM numbers(100000);
+-- SAMPLE OFFSET is rejected by the Bernoulli path but supported natively;
+-- a successful query here proves the native path is used.
+SELECT count() > 0 FROM t_bernoulli_sbk SAMPLE 0.5 OFFSET 0.5;
+-- bernoulli_sample_seed has no effect on the native path.
+SELECT
+    (SELECT count() FROM t_bernoulli_sbk SAMPLE 0.1)
+    =
+    (SELECT count() FROM t_bernoulli_sbk SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42);
+-- Toggling allow_experimental_bernoulli_sample does not perturb tables with a SAMPLE BY key.
+SELECT
+    (SELECT count() FROM t_bernoulli_sbk SAMPLE 0.1 SETTINGS allow_experimental_bernoulli_sample = 0)
+    =
+    (SELECT count() FROM t_bernoulli_sbk SAMPLE 0.1 SETTINGS allow_experimental_bernoulli_sample = 1);
+
+SELECT 'parallel replicas read_tasks mode with bernoulli';
+-- In the modern 'read_tasks' mode (the default), every replica builds its own Bernoulli
+-- filter over its assigned mark ranges, so all replicas contribute and the total is
+-- close to p*N. Unlike the legacy 'sampling_key' mode, no replica reads zero rows.
+SELECT count() BETWEEN 8000 AND 12000 FROM t_bernoulli SAMPLE 0.1 SETTINGS
+    bernoulli_sample_seed = 42,
+    enable_parallel_replicas = 1,
+    max_parallel_replicas = 3,
+    parallel_replicas_mode = 'read_tasks',
+    parallel_replicas_for_non_replicated_merge_tree = 1,
+    cluster_for_parallel_replicas = 'test_cluster_one_shard_three_replicas_localhost';
+
+SELECT 'projection disabled by bernoulli';
+-- canUseProjectionForReadingStep in projectionsCommon.cpp short-circuits on
+-- isQueryWithSampling(), which is true for any SAMPLE clause (Bernoulli or native).
+-- If projections were used under Bernoulli, sum(v) would always equal 100000
+-- (the pre-aggregated value) instead of being filtered by the row-level filter.
+DROP TABLE IF EXISTS t_bernoulli_proj;
+CREATE TABLE t_bernoulli_proj
+(
+    x UInt64,
+    v UInt64,
+    PROJECTION p_agg (SELECT sum(v))
+)
+ENGINE = MergeTree ORDER BY x;
+INSERT INTO t_bernoulli_proj SELECT number, 1 FROM numbers(100000);
+-- Sanity: without sampling, the aggregating projection IS picked.
+SELECT count() > 0 FROM (EXPLAIN SELECT sum(v) FROM t_bernoulli_proj) WHERE explain LIKE '%p_agg%';
+-- Negative: with Bernoulli sampling, the projection MUST NOT be used.
+SELECT count() FROM (EXPLAIN SELECT sum(v) FROM t_bernoulli_proj SAMPLE 0.1) WHERE explain LIKE '%p_agg%';
+-- Value: matches the 9913 fingerprint from the basic Bernoulli test (v=1 so sum == count).
+-- A pre-aggregated projection result would have returned 100000 here.
+SELECT sum(v) FROM t_bernoulli_proj SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42;
+
 DROP TABLE t_bernoulli;
 DROP TABLE t_bernoulli_empty;
 DROP TABLE t_bernoulli_memory;
 DROP TABLE t_bernoulli_multi;
+DROP TABLE t_bernoulli_sbk;
+DROP TABLE t_bernoulli_proj;

@@ -49,3 +49,13 @@ bernoulli with merge table
 9913
 prewhere with bernoulli
 4955
+sample by key dominates the experimental flag
+1
+1
+1
+parallel replicas read_tasks mode with bernoulli
+1
+projection disabled by bernoulli
+1
+0
+9913
