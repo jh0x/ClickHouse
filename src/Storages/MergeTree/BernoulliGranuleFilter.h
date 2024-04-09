@@ -21,17 +21,21 @@ class MergeTreeIndexGranularity;
 ///
 ///   Build (single-threaded, once per part):
 ///
-///     mark 0         mark 1         mark 2         mark 3
-///     |-- 8192 rows --|-- 8192 rows --|-- 8192 rows --|-- ...
-///     *  *   *  *      *     *        (none)     *  *
-///     ^ckpt[0]         ^ckpt[1]       ^ckpt[2]       ^ckpt[3]
-///     selected: 1      selected: 1    selected: 0    selected: 1
+///     mark 0         mark 1         mark 2         mark 3        ...   mark K
+///     |-- 8192 rows --|-- 8192 rows --|-- 8192 rows --|-- ...           |-- ...
+///     *  *   *  *      *     *        (none)         *  *               *
+///     ^ckpt[0]                                                          ^ckpt[1]
+///     selected: 1      selected: 1    selected: 0    selected: 1  ...   selected: 1
 ///
 ///   Read (per thread, any row range):
-///     binary-search checkpoints -> restore RNG -> replay geometric skip
+///     binary-search checkpoints -> restore RNG -> replay the geometric skip
+///     forward (up to `CHECKPOINT_STRIDE` marks) until reaching the row range.
 ///
-/// Each checkpoint stores (rng_state, remaining_skip) so that any thread can
-/// replay the exact hit sequence for its row range. Memory is O(marks) not O(rows).
+/// Each checkpoint stores `(mark_start_row, remaining_skip, rng_state)` so that any
+/// thread can replay the exact hit sequence for its row range. One checkpoint is
+/// kept every `CHECKPOINT_STRIDE` marks, so the per-part checkpoint memory is
+/// `O(marks / CHECKPOINT_STRIDE)`. The `granules_selected` bitmap is still one bit
+/// per mark and is consulted by `canSkipMark`.
 class BernoulliGranuleFilter
 {
 public:
@@ -41,6 +45,14 @@ public:
         size_t remaining_skip; /// geometric skip counter at mark boundary (rows remaining before next hit)
         pcg64 rng; /// RNG state at mark boundary
     };
+
+    /// Save one checkpoint every this many marks. Replay walks at most
+    /// `CHECKPOINT_STRIDE - 1` marks of the geometric-skip sequence to seek
+    /// from the resumed checkpoint to the requested row range. Increasing this
+    /// shrinks per-part memory linearly and grows the per-replay walk linearly;
+    /// 16 keeps the worst-case walk well below per-granule scan cost while
+    /// reducing checkpoint memory ~16x compared to one-checkpoint-per-mark.
+    static constexpr size_t CHECKPOINT_STRIDE = 16;
 
     /// Returns true if the mark contains no sampled rows and can be skipped.
     bool canSkipMark(size_t mark) const;

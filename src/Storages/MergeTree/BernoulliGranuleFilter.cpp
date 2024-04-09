@@ -88,7 +88,7 @@ BernoulliGranuleFilter::build(const MergeTreeIndexGranularity & index_granularit
 
     filter->log_one_minus_p = std::log(1.0 - probability);
     filter->granules_selected.resize(num_marks, false);
-    filter->checkpoints.reserve(num_marks);
+    filter->checkpoints.reserve((num_marks + CHECKPOINT_STRIDE - 1) / CHECKPOINT_STRIDE);
 
     pcg64 rng(part_seed);
     size_t remaining_skip = nextGeometricSkip(rng, filter->log_one_minus_p);
@@ -96,8 +96,11 @@ BernoulliGranuleFilter::build(const MergeTreeIndexGranularity & index_granularit
     size_t cumulative_row = 0;
     for (size_t mark = 0; mark < num_marks; ++mark)
     {
-        /// Save checkpoint at the start of this mark.
-        filter->checkpoints.emplace_back(cumulative_row, remaining_skip, rng);
+        /// Save a sparse checkpoint at the start of every CHECKPOINT_STRIDE marks.
+        /// Replay binary-searches for the latest checkpoint at-or-before its
+        /// `starting_row` and walks the geometric-skip sequence forward from there.
+        if (mark % CHECKPOINT_STRIDE == 0)
+            filter->checkpoints.emplace_back(cumulative_row, remaining_skip, rng);
 
         size_t rows_in_mark = index_granularity.getMarkRows(mark);
         /// Clamp the last granule to actual row count.
