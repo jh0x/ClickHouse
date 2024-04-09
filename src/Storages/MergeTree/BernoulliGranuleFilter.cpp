@@ -104,16 +104,19 @@ BernoulliGranuleFilter::build(const MergeTreeIndexGranularity & index_granularit
         if (cumulative_row + rows_in_mark > total_rows)
             rows_in_mark = total_rows - cumulative_row;
 
-        /// Walk geometric skip through this mark's rows.
+        /// Walk hits across this mark. Each iteration records one hit at
+        /// offset `remaining_skip` within the unconsumed tail of the mark,
+        /// advances past it, and draws the next skip distance.
         while (remaining_skip < rows_in_mark)
         {
             filter->granules_selected.set(mark);
-            size_t skip = nextGeometricSkip(rng, filter->log_one_minus_p) + 1;
-            rows_in_mark -= remaining_skip + 1;
-            remaining_skip = skip - 1;
+            const size_t rows_consumed = remaining_skip + 1; /// skipped rows + the hit row itself
+            rows_in_mark -= rows_consumed;
+            remaining_skip = nextGeometricSkip(rng, filter->log_one_minus_p);
         }
 
-        /// No more hits in this mark - adjust skip counter for next mark.
+        /// The next hit lies past the end of this mark; carry the leftover
+        /// skip distance over into the next mark.
         remaining_skip -= rows_in_mark;
         cumulative_row += index_granularity.getMarkRows(mark);
         cumulative_row = std::min(cumulative_row, total_rows);

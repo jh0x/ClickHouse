@@ -154,6 +154,11 @@ size_t MergeTreeReaderIndex::readRows(
     {
         if (filter_column == nullptr)
             filter_column = ColumnUInt8::create();
+        else if (!typeid_cast<const ColumnUInt8 *>(filter_column.get()))
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Illegal type {} of filter column for Bernoulli sampling. Must be UInt8",
+                filter_column->getName());
 
         auto mutable_filter_column = filter_column->assumeMutable();
         auto & filter_data = static_cast<ColumnUInt8 &>(*mutable_filter_column).getData();
