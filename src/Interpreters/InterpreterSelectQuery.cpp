@@ -885,7 +885,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         {
             {
                 const bool has_sample_clause = query.sampleSize() != nullptr;
-                const bool supports_native_sampling = storage && storage->supportsSampling();
+                const bool supports_native_sampling = !input_pipe && storage && storage->supportsSampling();
                 /// Bernoulli sampling only works when reading directly from MergeTree (not via input_pipe).
                 const bool supports_bernoulli_sampling = !input_pipe && storage && storage->isMergeTree()
                     && context->getSettingsRef()[Setting::allow_experimental_bernoulli_sample];
