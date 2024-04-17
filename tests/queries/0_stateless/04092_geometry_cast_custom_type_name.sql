@@ -36,3 +36,23 @@ CREATE TABLE t_geometry_cast_custom_type_name_poly (p Polygon) ENGINE = Memory;
 INSERT INTO t_geometry_cast_custom_type_name_poly VALUES ([[(0., 0.), (0., 5.), (5., 5.), (5., 0.)]]);
 SELECT areaCartesian(p) FROM t_geometry_cast_custom_type_name_poly;
 DROP TABLE t_geometry_cast_custom_type_name_poly;
+
+-- Geometry (Variant) type path
+SELECT 'Geometry from LineString = 0';
+SELECT areaCartesian(CAST([(0., 0.), (4., 0.), (4., 4.), (0., 4.)], 'LineString')::Geometry);
+
+SELECT 'Geometry from Ring = -16';
+SELECT areaCartesian(CAST([(0., 0.), (4., 0.), (4., 4.), (0., 4.)], 'Ring')::Geometry);
+
+SELECT 'Geometry from Polygon = 25';
+SELECT areaCartesian(CAST([[(0., 0.), (0., 5.), (5., 5.), (5., 0.)]], 'Polygon')::Geometry);
+
+SELECT 'Geometry from MultiLineString = 0';
+SELECT areaCartesian(CAST([[(0., 0.), (0., 5.), (5., 5.), (5., 0.)]], 'MultiLineString')::Geometry);
+
+SELECT 'Geometry column from table = 25';
+DROP TABLE IF EXISTS t_geometry_cast_custom_type_name_geom;
+CREATE TABLE t_geometry_cast_custom_type_name_geom (g Geometry) ENGINE = Memory;
+INSERT INTO t_geometry_cast_custom_type_name_geom VALUES (CAST([[(0., 0.), (0., 5.), (5., 5.), (5., 0.)]], 'Polygon'));
+SELECT areaCartesian(g) FROM t_geometry_cast_custom_type_name_geom;
+DROP TABLE t_geometry_cast_custom_type_name_geom;
