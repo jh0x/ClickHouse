@@ -350,41 +350,8 @@ protected:
         }
         return false;
     }
-};
 
-
-
-template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
-class AggregateFunctionMapBaseT 
-    : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
-    , private AggregateFunctionMapCommon
-{
-private:
-    using KeyT = Key;
-    using State = AggregateFunctionMapDataT<KeyT>;
-
-    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
-    
-public:
-    using Base = IAggregateFunctionDataHelper<State, Derived>;
-
-    AggregateFunctionMapBaseT(
-        const DataTypePtr & keys_type_,
-        const DataTypes & values_types_,
-        const DataTypes & argument_types_)
-        : Base(argument_types_, {}, createResultType(keys_type_, values_types_))
-        , AggregateFunctionMapCommon(keys_type_, values_types_)
-    {}
-
-    bool isVersioned() const override { return true; }
-
-    size_t getDefaultVersion() const override { return 1; } // JH TODO ???
-
-    size_t getVersionFromRevision(size_t revision) const override
-    {
-        return getVersionFromRevisionImpl(revision);
-    }
-
+    template <typename Visitor, bool overflow>
     static DataTypePtr createResultType(
         const DataTypePtr & keys_type_,
         const DataTypes & values_types_)
@@ -441,6 +408,40 @@ public:
         }
 
         return std::make_shared<DataTypeTuple>(types);
+    }
+};
+
+
+
+template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
+class AggregateFunctionMapBaseT 
+    : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
+    , private AggregateFunctionMapCommon
+{
+private:
+    using KeyT = Key;
+    using State = AggregateFunctionMapDataT<KeyT>;
+
+    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
+    
+public:
+    using Base = IAggregateFunctionDataHelper<State, Derived>;
+
+    AggregateFunctionMapBaseT(
+        const DataTypePtr & keys_type_,
+        const DataTypes & values_types_,
+        const DataTypes & argument_types_)
+        : Base(argument_types_, {}, createResultType<Visitor, overflow>(keys_type_, values_types_))
+        , AggregateFunctionMapCommon(keys_type_, values_types_)
+    {}
+
+    bool isVersioned() const override { return true; }
+
+    size_t getDefaultVersion() const override { return 1; } // JH TODO ???
+
+    size_t getVersionFromRevision(size_t revision) const override
+    {
+        return getVersionFromRevisionImpl(revision);
     }
 
     bool allocatesMemoryInArena() const override { return false; }
