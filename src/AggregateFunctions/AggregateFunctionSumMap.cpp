@@ -292,14 +292,9 @@ COLUMN_TYPE_TRAITS_LIST(DEFINE_COLUMN_TYPE_TRAITS)
   * NOTE: The implementation of these functions are "amateur grade" - not efficient and low quality.
   */
 
-template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
-class AggregateFunctionMapBaseT : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
+class AggregateFunctionMapCommon
 {
-private:
-    using KeyT = Key;
-    using State = AggregateFunctionMapDataT<KeyT>;
-
-    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
+protected:
     static constexpr auto STATE_VERSION_1_MIN_REVISION = 54452;
 
     DataTypePtr keys_type;
@@ -308,45 +303,86 @@ private:
     Serializations values_serializations;
     Serializations promoted_values_serializations;
 
-public:
-    using Base = IAggregateFunctionDataHelper<State, Derived>;
-
-    AggregateFunctionMapBaseT(const DataTypePtr & keys_type_,
-            const DataTypes & values_types_, const DataTypes & argument_types_)
-        : Base(argument_types_, {} /* parameters */, createResultType(keys_type_, values_types_))
-        , keys_type(keys_type_)
-        , keys_serialization(keys_type->getDefaultSerialization())
+    explicit AggregateFunctionMapCommon(
+        const DataTypePtr & keys_type_,
+        const DataTypes & values_types_)
+        : keys_type(keys_type_)
+        , keys_serialization(keys_type_->getDefaultSerialization())
         , values_types(values_types_)
     {
         values_serializations.reserve(values_types.size());
         promoted_values_serializations.reserve(values_types.size());
+
         for (const auto & type : values_types)
         {
             values_serializations.emplace_back(type->getDefaultSerialization());
+
             if (type->canBePromoted())
             {
                 if (type->isNullable())
                     promoted_values_serializations.emplace_back(
-                         makeNullable(removeNullable(type)->promoteNumericType())->getDefaultSerialization());
+                        makeNullable(removeNullable(type)->promoteNumericType())
+                            ->getDefaultSerialization());
                 else
-                    promoted_values_serializations.emplace_back(type->promoteNumericType()->getDefaultSerialization());
+                    promoted_values_serializations.emplace_back(
+                        type->promoteNumericType()->getDefaultSerialization());
             }
             else
             {
-                promoted_values_serializations.emplace_back(type->getDefaultSerialization());
+                promoted_values_serializations.emplace_back(
+                    type->getDefaultSerialization());
             }
         }
     }
 
+    size_t getVersionFromRevisionImpl(size_t revision) const
+    {
+        return revision >= STATE_VERSION_1_MIN_REVISION ? 1 : 0;
+    }
+
+    bool notCompacted(const Array & values) const
+    {
+        for (size_t col = 0; col < values_types.size(); ++col)
+        {
+            if (!values[col].isNull() &&
+                values[col] != values_types[col]->getDefault())
+                return true;
+        }
+        return false;
+    }
+};
+
+
+
+template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
+class AggregateFunctionMapBaseT 
+    : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
+    , private AggregateFunctionMapCommon
+{
+private:
+    using KeyT = Key;
+    using State = AggregateFunctionMapDataT<KeyT>;
+
+    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
+    
+public:
+    using Base = IAggregateFunctionDataHelper<State, Derived>;
+
+    AggregateFunctionMapBaseT(
+        const DataTypePtr & keys_type_,
+        const DataTypes & values_types_,
+        const DataTypes & argument_types_)
+        : Base(argument_types_, {}, createResultType(keys_type_, values_types_))
+        , AggregateFunctionMapCommon(keys_type_, values_types_)
+    {}
+
     bool isVersioned() const override { return true; }
 
-    size_t getDefaultVersion() const override { return 1; } // JH: TODO???
+    size_t getDefaultVersion() const override { return 1; } // JH TODO ???
 
     size_t getVersionFromRevision(size_t revision) const override
     {
-        if (revision >= STATE_VERSION_1_MIN_REVISION)
-            return 1;
-        return 0;
+        return getVersionFromRevisionImpl(revision);
     }
 
     static DataTypePtr createResultType(
@@ -615,18 +651,6 @@ public:
         // Final step does compaction of keys that have zero values, this mutates the state
         auto & scratch = this->data(place);
 
-        auto not_compacted = [&](const Array & values){
-            // Key is not compacted if it has at least one non-zero value
-            for (size_t col = 0; col < num_columns; ++col)
-            {
-                if (!values[col].isNull() && values[col] != values_types[col]->getDefault())
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
-
         size_t size = [&]{
             if constexpr (!compact) {
                 return scratch.mapSize();
@@ -636,7 +660,7 @@ public:
                 size_t res{};
                 scratch.forEach([&](const auto & /*key*/, const Array & values)
                 {
-                    res += not_compacted(values);
+                    res += notCompacted(values);
                 });
                 return res;
             }
@@ -665,7 +689,7 @@ public:
             {
                 if constexpr (compact)
                 {
-                    if (!not_compacted(values))
+                    if (!notCompacted(values))
                         return;
                 }
                 to_keys_col.insert(key);
@@ -700,7 +724,7 @@ public:
 
                 if constexpr (compact)
                 {
-                    if (!not_compacted(values))
+                    if (!notCompacted(values))
                         continue;
                 }
 
