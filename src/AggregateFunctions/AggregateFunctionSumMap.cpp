@@ -10,12 +10,21 @@
 #include <Columns/ColumnTuple.h>
 #include <Columns/ColumnString.h>
 
+#include <Common/HashTable/HashMap.h>
+#include <Common/HashTable/HashSet.h>
 #include <Common/FieldVisitorSum.h>
 #include <Common/assert_cast.h>
+#include "AggregateFunctions/IAggregateFunction_fwd.h"
+#include "Core/Field.h"
 #include <AggregateFunctions/IAggregateFunction.h>
 #include <AggregateFunctions/FactoryHelpers.h>
-#include <map>
 
+#include <absl/container/btree_map.h>
+#include <absl/container/btree_set.h>
+
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace DB
 {
@@ -33,11 +42,204 @@ namespace ErrorCodes
 namespace
 {
 
-struct AggregateFunctionMapData
-{
-    // Map needs to be ordered to maintain function properties
-    std::map<Field, Array> merged_maps;
+template <typename Key>
+class AggregateFunctionMapDataT
+{ 
+    using KeyT = Key;
+    using MappedIndex = UInt64;
+    using Map = HashMapWithStackMemory<KeyT, MappedIndex, DefaultHash<KeyT>, 4>;
+    using ValueStore = std::vector<Array>;
+    //static constexpr bool isSorted = false; // TODO: JH
+    Map work_map;
+    ValueStore value_store;
+
+public:
+    size_t mapSize() const { return work_map.size(); }
+
+    template <typename Visitor>
+    void add(const KeyT& key, const Field& value, size_t col, size_t value_array_size)
+    {
+        typename Map::LookupResult it;
+        bool inserted;
+        work_map.emplace(key, it, inserted);
+
+        if (inserted)
+        {
+            it->getMapped() = value_store.size();
+            auto& arr = value_store.emplace_back(value_array_size);
+            arr[col] = value;
+        }
+        else if (!value.isNull())
+        {
+            auto& entry = value_store[it->getMapped()];
+            if (entry[col].isNull())
+                entry[col] = value;
+            else
+                applyVisitor(Visitor(value), entry[col]);
+        }
+    }
+
+    void add(const KeyT& key, Array values)
+    {
+        typename Map::LookupResult it;
+        bool inserted;
+        work_map.emplace(key, it, inserted);
+        if(inserted) [[likely]]
+        {
+            it->getMapped() = value_store.size();
+            value_store.push_back(std::move(values));
+        }
+    }
+
+    template <typename Visitor>
+    void merge(const AggregateFunctionMapDataT& other, size_t value_array_size)
+    {
+        for (auto it = std::begin(other.work_map); it != std::end(other.work_map); ++it)
+        {
+            const auto& other_key = it->getKey();
+            const auto other_index = it->getMapped();
+            typename Map::LookupResult self_it;
+            bool inserted;
+            work_map.emplace(other_key, self_it, inserted);
+            if (inserted)
+            {
+                self_it->getMapped() = value_store.size();
+                value_store.push_back(other.value_store[other_index]);
+            }
+            else
+            {
+                auto& self_entry = value_store[self_it->getMapped()];
+                const auto& other_entry = other.value_store[other_index];
+                for (size_t i = 0; i < value_array_size; ++i)
+                {
+                    if (!other_entry[i].isNull())
+                    {
+                        if (self_entry[i].isNull())
+                            self_entry[i] = other_entry[i];
+                        else
+                            applyVisitor(Visitor(other_entry[i]), self_entry[i]);
+                    }
+                }
+            }
+        }
+    }
+
+    template <typename F>
+    void forEach(F&& f) const
+    {
+        for (auto it = std::begin(work_map); it != std::end(work_map); ++it)
+        {
+            const auto& key = it->getKey();
+            const auto index = it->getMapped();
+            f(key, value_store[index]);
+        }
+    }
 };
+
+template <>
+class AggregateFunctionMapDataT<Field>
+{
+    using KeyT = Field;
+    using Value = Array;
+    using Map = absl::btree_map<KeyT, Value>;
+    //static constexpr bool isSorted = true;
+
+    Map merged_maps;
+public:
+    size_t mapSize() const
+    {
+        return merged_maps.size();
+    }
+
+    template <typename Visitor>
+    void add(const KeyT & key, const Field & value, size_t col, size_t value_array_size)
+    {
+        auto [it, inserted] =
+            merged_maps.try_emplace(key, Value(value_array_size));
+
+        auto & entry = it->second;
+
+        if (inserted)
+        {
+            entry[col] = value;
+        }
+        else if (!value.isNull())
+        {
+            if (entry[col].isNull())
+                entry[col] = value;
+            else
+                applyVisitor(Visitor(value), entry[col]);
+        }
+    }
+
+    void add(const KeyT & key, Array values)
+    {
+        merged_maps.try_emplace(key, std::move(values));
+    }
+
+    template <typename Visitor>
+    void merge(const AggregateFunctionMapDataT & other, size_t value_array_size)
+    {
+        for (const auto & [other_key, other_entry] : other.merged_maps)
+        {
+            auto [it, inserted] =
+                merged_maps.try_emplace(other_key, other_entry);
+
+            if (!inserted)
+            {
+                auto & self_entry = it->second;
+
+                for (size_t i = 0; i < value_array_size; ++i)
+                {
+                    if (!other_entry[i].isNull())
+                    {
+                        if (self_entry[i].isNull())
+                            self_entry[i] = other_entry[i];
+                        else
+                            applyVisitor(
+                                Visitor(other_entry[i]),
+                                self_entry[i]);
+                    }
+                }
+            }
+        }
+    }
+
+    template <typename F>
+    void forEach(F && f) const
+    {
+        for (const auto & [key, value] : merged_maps)
+            f(key, value);
+    }
+};
+
+
+// JH: TODO:
+
+
+#define COLUMN_TYPE_TRAITS_LIST(M) \
+    M(Int8,   ColumnInt8)          \
+    M(UInt8,  ColumnUInt8)         \
+    M(Int16,  ColumnInt16)         \
+    M(UInt16, ColumnUInt16)        \
+    M(Int32,  ColumnInt32)         \
+    M(UInt32, ColumnUInt32)        \
+    M(Int64,  ColumnInt64)         \
+    M(UInt64, ColumnUInt64)
+
+template <typename T>
+struct ColumnTypeTraits;
+
+#define DEFINE_COLUMN_TYPE_TRAITS(Type, Column) \
+    template <>                                \
+    struct ColumnTypeTraits<Type>              \
+    {                                          \
+        using ColumnType = Column;             \
+    };
+
+COLUMN_TYPE_TRAITS_LIST(DEFINE_COLUMN_TYPE_TRAITS)
+
+#undef DEFINE_COLUMN_TYPE_TRAITS
 
 /** Aggregate function, that takes at least two arguments: keys and values, and as a result, builds a tuple of at least 2 arrays -
   * ordered keys and variable number of argument values aggregated by corresponding keys.
@@ -60,11 +262,14 @@ struct AggregateFunctionMapData
   * NOTE: The implementation of these functions are "amateur grade" - not efficient and low quality.
   */
 
-template <typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
-class AggregateFunctionMapBase : public IAggregateFunctionDataHelper<
-    AggregateFunctionMapData, Derived>
+template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
+class AggregateFunctionMapBaseT : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
 {
 private:
+    using KeyT = Key;
+    using State = AggregateFunctionMapDataT<KeyT>;
+
+    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
     static constexpr auto STATE_VERSION_1_MIN_REVISION = 54452;
 
     DataTypePtr keys_type;
@@ -74,9 +279,9 @@ private:
     Serializations promoted_values_serializations;
 
 public:
-    using Base = IAggregateFunctionDataHelper<AggregateFunctionMapData, Derived>;
+    using Base = IAggregateFunctionDataHelper<State, Derived>;
 
-    AggregateFunctionMapBase(const DataTypePtr & keys_type_,
+    AggregateFunctionMapBaseT(const DataTypePtr & keys_type_,
             const DataTypes & values_types_, const DataTypes & argument_types_)
         : Base(argument_types_, {} /* parameters */, createResultType(keys_type_, values_types_))
         , keys_type(keys_type_)
@@ -105,7 +310,7 @@ public:
 
     bool isVersioned() const override { return true; }
 
-    size_t getDefaultVersion() const override { return 1; }
+    size_t getDefaultVersion() const override { return 1; } // JH: TODO???
 
     size_t getVersionFromRevision(size_t revision) const override
     {
@@ -193,13 +398,24 @@ public:
         // Column 0 contains array of keys of known type
         const ColumnArray & array_column0 = assert_cast<const ColumnArray &>(*columns[0]);
         const IColumn::Offsets & offsets0 = array_column0.getOffsets();
-        const IColumn & key_column = array_column0.getData();
+        const IColumn & key_column_generic = array_column0.getData();
         const size_t keys_vec_offset = offsets0[row_num - 1];
         const size_t keys_vec_size = (offsets0[row_num] - keys_vec_offset);
 
+        const auto & key_column = [&]() -> decltype(auto) {
+            if constexpr(is_generic_field)
+                return key_column_generic;
+            else
+            {
+                using ColumnType = typename ColumnTypeTraits<KeyT>::ColumnType;
+                return assert_cast<const ColumnType &>(key_column_generic);
+            }
+        }();
+
         // Columns 1..n contain arrays of numeric values to sum
-        auto & merged_maps = this->data(place).merged_maps;
-        for (size_t col = 0, size = values_types.size(); col < size; ++col)
+        auto & scratch = this->data(place);
+        const auto values_types_size = values_types.size();
+        for (size_t col = 0, size = values_types_size; col < size; ++col)
         {
             const auto & array_column = assert_cast<const ColumnArray &>(*columns[col + 1]);
             const IColumn & value_column = array_column.getData();
@@ -215,58 +431,26 @@ public:
             for (size_t i = 0; i < keys_vec_size; ++i)
             {
                 Field value = value_column[values_vec_offset + i];
-                Field key = key_column[keys_vec_offset + i];
+                auto key = [&]{
+                    if constexpr(is_generic_field)
+                        return key_column[keys_vec_offset + i];
+                    else
+                        return key_column.getElement(keys_vec_offset + i);
+                }();
 
                 if (!keepKey(key))
                     continue;
 
-                auto [it, inserted] = merged_maps.emplace(key, Array());
-
-                if (inserted)
-                {
-                    it->second.resize(size);
-                    it->second[col] = value;
-                }
-                else
-                {
-                    if (!value.isNull())
-                    {
-                        if (it->second[col].isNull())
-                            it->second[col] = value;
-                        else
-                            applyVisitor(Visitor(value), it->second[col]);
-                    }
-                }
+                scratch.template add<Visitor>(key, value, col, values_types_size);
             }
         }
     }
 
     void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override
     {
-        auto & merged_maps = this->data(place).merged_maps;
-        const auto & rhs_maps = this->data(rhs).merged_maps;
-
-        for (const auto & elem : rhs_maps)
-        {
-            const auto & it = merged_maps.find(elem.first);
-            if (it != merged_maps.end())
-            {
-                for (size_t col = 0; col < values_types.size(); ++col)
-                {
-                    if (!elem.second[col].isNull())
-                    {
-                        if (it->second[col].isNull())
-                            it->second[col] = elem.second[col];
-                        else
-                            applyVisitor(Visitor(elem.second[col]), it->second[col]);
-                    }
-                }
-            }
-            else
-            {
-                merged_maps[elem.first] = elem.second;
-            }
-        }
+        auto & our_scratch = this->data(place);
+        const auto & their_scratch = this->data(rhs);
+        our_scratch.template merge<Visitor>(their_scratch, values_types.size());
     }
 
     void serialize(ConstAggregateDataPtr __restrict place, WriteBuffer & buf, std::optional<size_t> version) const override
@@ -274,8 +458,8 @@ public:
         if (!version)
             version = getDefaultVersion();
 
-        const auto & merged_maps = this->data(place).merged_maps;
-        size_t size = merged_maps.size();
+        const auto & scratch = this->data(place);
+        size_t size = scratch.mapSize();
         writeVarUInt(size, buf);
 
         std::function<void(size_t, const Array &)> serialize;
@@ -316,12 +500,15 @@ public:
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Unknown version {}, of -Map aggregate function serialization state", *version);
         }
 
-        for (const auto & elem : merged_maps)
+        scratch.forEach([&](const auto & key, const Array & values)
         {
-            keys_serialization->serializeBinary(elem.first, buf, {});
+            if constexpr (is_generic_field)
+                keys_serialization->serializeBinary(key, buf, {});
+            else
+                writeBinary(key, buf);
             for (size_t col = 0; col < values_types.size(); ++col)
-                serialize(col, elem.second);
-        }
+                serialize(col, values);
+        });
     }
 
     void deserialize(AggregateDataPtr __restrict place, ReadBuffer & buf, std::optional<size_t> version, Arena *) const override
@@ -329,7 +516,7 @@ public:
         if (!version)
             version = getDefaultVersion();
 
-        auto & merged_maps = this->data(place).merged_maps;
+        auto & scratch = this->data(place);
         size_t size = 0;
         readVarUInt(size, buf);
 
@@ -375,8 +562,11 @@ public:
 
         for (size_t i = 0; i < size; ++i)
         {
-            Field key;
-            keys_serialization->deserializeBinary(key, buf, format_settings);
+            KeyT key;
+            if constexpr (is_generic_field)
+                keys_serialization->deserializeBinary(key, buf, format_settings);
+            else
+                readBinary(key, buf);
 
             Array values;
             values.resize(values_types.size());
@@ -384,7 +574,7 @@ public:
             for (size_t col = 0; col < values_types.size(); ++col)
                 deserialize(col, values);
 
-            merged_maps[key] = values;
+            scratch.add(key, std::move(values));
         }
     }
 
@@ -393,32 +583,34 @@ public:
         size_t num_columns = values_types.size();
 
         // Final step does compaction of keys that have zero values, this mutates the state
-        auto & merged_maps = this->data(place).merged_maps;
+        auto & scratch = this->data(place);
 
-        // Remove keys which are zeros or empty. This should be enabled only for sumMap.
-        if constexpr (compact)
-        {
-            for (auto it = merged_maps.cbegin(); it != merged_maps.cend();)
+        auto not_compacted = [&](const Array & values){
+            // Key is not compacted if it has at least one non-zero value
+            for (size_t col = 0; col < num_columns; ++col)
             {
-                // Key is not compacted if it has at least one non-zero value
-                bool erase = true;
-                for (size_t col = 0; col < num_columns; ++col)
+                if (!values[col].isNull() && values[col] != values_types[col]->getDefault())
                 {
-                    if (!it->second[col].isNull() && it->second[col] != values_types[col]->getDefault())
-                    {
-                        erase = false;
-                        break;
-                    }
+                    return true;
                 }
-
-                if (erase)
-                    it = merged_maps.erase(it);
-                else
-                    ++it;
             }
-        }
+            return false;
+        };
 
-        size_t size = merged_maps.size();
+        size_t size = [&]{
+            if constexpr (!compact) {
+                return scratch.mapSize();
+            }
+            else
+            {
+                size_t res{};
+                scratch.forEach([&](const auto & /*key*/, const Array & values)
+                {
+                    res += not_compacted(values);
+                });
+                return res;
+            }
+        }();
 
         auto & to_tuple = assert_cast<ColumnTuple &>(to);
         auto & to_keys_arr = assert_cast<ColumnArray &>(to_tuple.getColumn(0));
@@ -438,34 +630,44 @@ public:
         }
 
         // Write arrays of keys and values
-        for (const auto & elem : merged_maps)
+        scratch.forEach([&](const auto & key, const Array & values)
         {
-            // Write array of keys into column
-            to_keys_col.insert(elem.first);
-
+            if constexpr (compact)
+            {
+                if (!not_compacted(values))
+                    return;
+            }
+            to_keys_col.insert(key);
             // Write 0..n arrays of values
             for (size_t col = 0; col < num_columns; ++col)
             {
                 auto & to_values_col = assert_cast<ColumnArray &>(to_tuple.getColumn(col + 1)).getData();
-                if (elem.second[col].isNull())
+                if (values[col].isNull())
                     to_values_col.insertDefault();
                 else
-                    to_values_col.insert(elem.second[col]);
+                    to_values_col.insert(values[col]);
             }
-        }
+        });
     }
 
-    bool keepKey(const Field & key) const { return static_cast<const Derived &>(*this).keepKey(key); }
+    bool keepKey(const std::conditional_t<is_generic_field, Field, KeyT> & key) const { return static_cast<const Derived &>(*this).keepKey(key); }
     String getName() const override { return Derived::getNameImpl(); }
 };
 
-template <bool overflow, bool tuple_argument>
+template <typename Key, bool overflow, bool tuple_argument>
 class AggregateFunctionSumMap final :
-    public AggregateFunctionMapBase<AggregateFunctionSumMap<overflow, tuple_argument>, FieldVisitorSum, overflow, tuple_argument, true>
+    public AggregateFunctionMapBaseT<
+        Key,
+        AggregateFunctionSumMap<Key, overflow, tuple_argument>,
+        FieldVisitorSum,
+        overflow,
+        tuple_argument,
+        true>
 {
 private:
-    using Self = AggregateFunctionSumMap<overflow, tuple_argument>;
-    using Base = AggregateFunctionMapBase<Self, FieldVisitorSum, overflow, tuple_argument, true>;
+    using KeyT = Key;
+    using Self = AggregateFunctionSumMap<KeyT, overflow, tuple_argument>;
+    using Base = AggregateFunctionMapBaseT<KeyT, Self, FieldVisitorSum, overflow, tuple_argument, true>;
 
 public:
     AggregateFunctionSumMap(const DataTypePtr & keys_type_,
@@ -493,21 +695,44 @@ public:
     bool keepKey(const Field &) const { return true; }
 };
 
+class KeySet
+{
+    using ContainerT = absl::btree_set<Field>;
 
-template <bool overflow, bool tuple_argument>
+    ContainerT set;
+
+public:
+    template <typename... Args>
+    bool emplace(Args&&... args)
+    {
+        auto [it, inserted] = set.emplace(std::forward<Args>(args)...);
+        return inserted;
+    }
+
+    bool contains(const Field& value) const
+    {
+        return set.contains(value);
+    }
+};
+// JH We'd template above and use for Field, and HashSet for others, but few Field related questions below...
+
+
+template <typename Key, bool overflow, bool tuple_argument>
 class AggregateFunctionSumMapFiltered final :
-    public AggregateFunctionMapBase<
-        AggregateFunctionSumMapFiltered<overflow, tuple_argument>,
+    public AggregateFunctionMapBaseT<
+        Key,
+        AggregateFunctionSumMapFiltered<Key, overflow, tuple_argument>,
         FieldVisitorSum,
         overflow,
         tuple_argument,
         true>
 {
 private:
-    using Self = AggregateFunctionSumMapFiltered<overflow, tuple_argument>;
-    using Base = AggregateFunctionMapBase<Self, FieldVisitorSum, overflow, tuple_argument, true>;
+    using KeyT = Key;
+    using Self = AggregateFunctionSumMapFiltered<KeyT, overflow, tuple_argument>;
+    using Base = AggregateFunctionMapBaseT<KeyT, Self, FieldVisitorSum, overflow, tuple_argument, true>;
 
-    using ContainerT = std::set<Field>;
+    using ContainerT = KeySet; // JH FIXME - maybe - there's some field business below...
     ContainerT keys_to_keep;
 
 public:
@@ -530,8 +755,9 @@ public:
         this->parameters = params_;
 
         for (const Field & f : keys_to_keep_values)
-            keys_to_keep.emplace(f);
+            keys_to_keep.emplace(f); // and this - if we went for KeyT - how to handle?
     }
+        
 
     static String getNameImpl()
     {
@@ -550,17 +776,18 @@ public:
         if (keys_to_keep.contains(key))
             return true;
 
+        // JH TODO... - some field business mentioned earlier
         // Determine whether the numerical value of the key can have both types (UInt or Int),
         // and use the other type with the same numerical value for keepKey verification.
         if (key.getType() == Field::Types::UInt64)
         {
-            const auto & value = key.safeGet<UInt64>();
+            const auto & value = key.template safeGet<UInt64>();
             if (value <= std::numeric_limits<Int64>::max())
                 return keys_to_keep.contains(Field(Int64(value)));
         }
         else if (key.getType() == Field::Types::Int64)
         {
-            const auto & value = key.safeGet<Int64>();
+            const auto & value = key.template safeGet<Int64>();
             if (value >= 0)
                 return keys_to_keep.contains(Field(UInt64(value)));
         }
@@ -652,13 +879,14 @@ public:
 };
 
 
-template <bool tuple_argument>
+template <typename Key, bool tuple_argument>
 class AggregateFunctionMinMap final :
-    public AggregateFunctionMapBase<AggregateFunctionMinMap<tuple_argument>, FieldVisitorMin, true, tuple_argument, false>
+    public AggregateFunctionMapBaseT<Key, AggregateFunctionMinMap<Key, tuple_argument>, FieldVisitorMin, true, tuple_argument, false>
 {
 private:
-    using Self = AggregateFunctionMinMap<tuple_argument>;
-    using Base = AggregateFunctionMapBase<Self, FieldVisitorMin, true, tuple_argument, false>;
+    using KeyT = Key;
+    using Self = AggregateFunctionMinMap<KeyT, tuple_argument>;
+    using Base = AggregateFunctionMapBaseT<KeyT, Self, FieldVisitorMin, true, tuple_argument, false>;
 
 public:
     AggregateFunctionMinMap(const DataTypePtr & keys_type_,
@@ -676,13 +904,14 @@ public:
     bool keepKey(const Field &) const { return true; }
 };
 
-template <bool tuple_argument>
+template <typename Key, bool tuple_argument>
 class AggregateFunctionMaxMap final :
-    public AggregateFunctionMapBase<AggregateFunctionMaxMap<tuple_argument>, FieldVisitorMax, true, tuple_argument, false>
+    public AggregateFunctionMapBaseT<Key, AggregateFunctionMaxMap<Key, tuple_argument>, FieldVisitorMax, true, tuple_argument, false>
 {
 private:
-    using Self = AggregateFunctionMaxMap<tuple_argument>;
-    using Base = AggregateFunctionMapBase<Self, FieldVisitorMax, true, tuple_argument, false>;
+    using KeyT = Key;
+    using Self = AggregateFunctionMaxMap<KeyT, tuple_argument>;
+    using Base = AggregateFunctionMapBaseT<KeyT, Self, FieldVisitorMax, true, tuple_argument, false>;
 
 public:
     AggregateFunctionMaxMap(const DataTypePtr & keys_type_,
@@ -751,6 +980,36 @@ auto parseArguments(const std::string & name, const DataTypes & arguments)
     return std::tuple<DataTypePtr, DataTypes, bool>{std::move(keys_type), std::move(values_types), tuple_argument};
 }
 
+}
+
+template <typename Builder, typename... Args>
+AggregateFunctionPtr createAggregateFunctionMap(
+    Builder && builder,
+    DataTypePtr keys_type,
+    Args&&... args)
+{
+    WhichDataType which(keys_type);
+    switch (which.idx)
+    {
+        case TypeIndex::UInt8:
+            return builder.template operator()<UInt8>(std::forward<Args>(args)...);
+        case TypeIndex::UInt16:
+            return builder.template operator()<UInt16>(std::forward<Args>(args)...);
+        case TypeIndex::UInt32:
+            return builder.template operator()<UInt32>(std::forward<Args>(args)...);
+        case TypeIndex::UInt64:
+            return builder.template operator()<UInt64>(std::forward<Args>(args)...);
+        case TypeIndex::Int8:
+            return builder.template operator()<Int8>(std::forward<Args>(args)...);
+        case TypeIndex::Int16:
+            return builder.template operator()<Int16>(std::forward<Args>(args)...);
+        case TypeIndex::Int32:
+            return builder.template operator()<Int32>(std::forward<Args>(args)...);
+        case TypeIndex::Int64:
+            return builder.template operator()<Int64>(std::forward<Args>(args)...);
+        default:
+            return builder.template operator()<Field>(std::forward<Args>(args)...);
+    }
 }
 
 void registerAggregateFunctionSumMap(AggregateFunctionFactory & factory)
@@ -851,8 +1110,20 @@ FROM multi_metrics;
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionSumMap<false, true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionSumMap<false, false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMap<Key, false, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMap<Key, false, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     }, {}, sumMappedArrays_documentation});
 
     FunctionDocumentation::Description minMappedArrays_description = R"(
@@ -894,8 +1165,20 @@ FROM VALUES('a Array(Int32), b Array(Int64)', ([1, 2], [2, 2]), ([2, 3], [1, 1])
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionMinMap<true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionMinMap<false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionMinMap<Key, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionMinMap<Key, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     }, {}, minMappedArrays_documentation});
 
     FunctionDocumentation::Description maxMappedArrays_description = R"(
@@ -937,8 +1220,20 @@ FROM VALUES('a Array(Char), b Array(Int64)', (['x', 'y'], [2, 2]), (['y', 'z'], 
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionMaxMap<true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionMaxMap<false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionMaxMap<Key, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionMaxMap<Key, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     }, {}, maxMappedArrays_documentation});
 
     // these functions could be renamed to *MappedArrays too, but it would
@@ -1021,24 +1316,62 @@ GROUP BY timeslot;
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionSumMap<true, true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionSumMap<true, false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMap<Key, true, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMap<Key, true, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     }, {}, sumMapWithOverflow_documentation});
+
 
     factory.registerFunction("sumMapFiltered", [](const std::string & name, const DataTypes & arguments, const Array & params, const Settings *) -> AggregateFunctionPtr
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionSumMapFiltered<false, true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionSumMapFiltered<false, false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMapFiltered<Key, false, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMapFiltered<Key, false, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     });
+
 
     factory.registerFunction("sumMapFilteredWithOverflow", [](const std::string & name, const DataTypes & arguments, const Array & params, const Settings *) -> AggregateFunctionPtr
     {
         auto [keys_type, values_types, tuple_argument] = parseArguments(name, arguments);
         if (tuple_argument)
-            return std::make_shared<AggregateFunctionSumMapFiltered<true, true>>(keys_type, values_types, arguments, params);
-        return std::make_shared<AggregateFunctionSumMapFiltered<true, false>>(keys_type, values_types, arguments, params);
+            return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMapFiltered<Key, true, true>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
+        return createAggregateFunctionMap(
+                    [&]<typename Key>() -> AggregateFunctionPtr
+                    {
+                        return std::make_shared<AggregateFunctionSumMapFiltered<Key, true, false>>(keys_type, values_types, arguments, params);
+                    },
+                    keys_type
+                );
     });
 }
 
