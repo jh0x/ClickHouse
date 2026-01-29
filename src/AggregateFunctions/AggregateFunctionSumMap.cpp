@@ -45,15 +45,28 @@ namespace
 template <typename Key>
 class AggregateFunctionMapDataT
 { 
+public:
     using KeyT = Key;
     using MappedIndex = UInt64;
-    using Map = HashMapWithStackMemory<KeyT, MappedIndex, DefaultHash<KeyT>, 4>;
+    using Map = HashMapWithStackMemory<KeyT, MappedIndex, DefaultHash<KeyT>, 10>;
     using ValueStore = std::vector<Array>;
-    //static constexpr bool isSorted = false; // TODO: JH
+    static constexpr bool isSorted = false;
+private:
+    // work_map:  Key  -->  index
+    //                    ┌───────────────┐
+    // value_store:       │ [0] Array     │
+    //                    │ [1] Array     │
+    //                    │ [2] Array     │
+    //                    └───────────────┘
     Map work_map;
     ValueStore value_store;
 
 public:
+    AggregateFunctionMapDataT()
+    {
+        value_store.reserve(1024);
+    }
+
     size_t mapSize() const { return work_map.size(); }
 
     template <typename Visitor>
@@ -134,17 +147,34 @@ public:
             f(key, value_store[index]);
         }
     }
+
+    template <typename F>
+    void forEachCell(F&& f) const
+    {
+        for (auto it = std::begin(work_map); it != std::end(work_map); ++it)
+        {
+            f(it);
+        }
+    }
+
+    const Array& getValueByIndex(size_t index) const
+    {
+        return value_store[index];
+    }
 };
 
 template <>
 class AggregateFunctionMapDataT<Field>
 {
+public:
     using KeyT = Field;
     using Value = Array;
     using Map = absl::btree_map<KeyT, Value>;
-    //static constexpr bool isSorted = true;
+    static constexpr bool isSorted = true;
 
+private:
     Map merged_maps;
+
 public:
     size_t mapSize() const
     {
@@ -629,25 +659,63 @@ public:
             to_values_arr.getData().reserve(size);
         }
 
-        // Write arrays of keys and values
-        scratch.forEach([&](const auto & key, const Array & values)
-        {
-            if constexpr (compact)
+        if constexpr (State::isSorted) {
+            // For Field keys, the map is already sorted (absl::btree_map), so we can iterate directly
+            scratch.forEach([&](const auto & key, const Array & values)
             {
-                if (!not_compacted(values))
-                    return;
+                if constexpr (compact)
+                {
+                    if (!not_compacted(values))
+                        return;
+                }
+                to_keys_col.insert(key);
+                // Write 0..n arrays of values
+                for (size_t col = 0; col < num_columns; ++col)
+                {
+                    auto & to_values_col = assert_cast<ColumnArray &>(to_tuple.getColumn(col + 1)).getData();
+                    if (values[col].isNull())
+                        to_values_col.insertDefault();
+                    else
+                        to_values_col.insert(values[col]);
+                }
+            });
+        } else {
+            // For non-Field keys, we need to sort the results to ensure consistent order
+            // Create a vector of iterators to the hash map entries and sort them by key
+            std::vector<typename State::Map::const_iterator> iterators;
+            iterators.reserve(scratch.mapSize());
+
+            scratch.forEachCell([&iterators](auto it) {
+                iterators.push_back(it);
+            });
+
+            std::sort(iterators.begin(), iterators.end(),
+                      [](const auto & a, const auto & b) {
+                          return a->getKey() < b->getKey();
+                      });
+
+            for (const auto & it : iterators) {
+                const auto & key = it->getKey();
+                const auto & values = scratch.getValueByIndex(it->getMapped());
+
+                if constexpr (compact)
+                {
+                    if (!not_compacted(values))
+                        continue;
+                }
+
+                to_keys_col.insert(key);
+                // Write 0..n arrays of values
+                for (size_t col = 0; col < num_columns; ++col)
+                {
+                    auto & to_values_col = assert_cast<ColumnArray &>(to_tuple.getColumn(col + 1)).getData();
+                    if (values[col].isNull())
+                        to_values_col.insertDefault();
+                    else
+                        to_values_col.insert(values[col]);
+                }
             }
-            to_keys_col.insert(key);
-            // Write 0..n arrays of values
-            for (size_t col = 0; col < num_columns; ++col)
-            {
-                auto & to_values_col = assert_cast<ColumnArray &>(to_tuple.getColumn(col + 1)).getData();
-                if (values[col].isNull())
-                    to_values_col.insertDefault();
-                else
-                    to_values_col.insert(values[col]);
-            }
-        });
+        }
     }
 
     bool keepKey(const std::conditional_t<is_generic_field, Field, KeyT> & key) const { return static_cast<const Derived &>(*this).keepKey(key); }
