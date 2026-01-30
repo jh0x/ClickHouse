@@ -793,7 +793,31 @@ public:
     bool keepKey(const Field &) const { return true; }
 };
 
+template<typename T>
 class KeySet
+{
+    using KeyT = NearestFieldType<T>;
+    using ContainerT = HashSetWithStackMemory<KeyT, DefaultHash<KeyT>, 8>;
+    ContainerT set;
+
+public:
+    template <typename... Args>
+    bool emplace(Args&&... args)
+    {
+        typename ContainerT::LookupResult it;
+        bool inserted;
+        set.emplace(std::forward<Args>(args)..., it, inserted);
+        return inserted;
+    }
+
+    bool contains(const KeyT& value) const
+    {
+        return set.contains(value);
+    }
+};
+
+template<>
+class KeySet<Field>
 {
     using ContainerT = absl::btree_set<Field>;
 
@@ -812,7 +836,6 @@ public:
         return set.contains(value);
     }
 };
-// JH We'd template above and use for Field, and HashSet for others, but few Field related questions below...
 
 
 template <typename Key, bool overflow, bool tuple_argument>
@@ -830,7 +853,8 @@ private:
     using Self = AggregateFunctionSumMapFiltered<KeyT, overflow, tuple_argument>;
     using Base = AggregateFunctionMapBaseT<KeyT, Self, FieldVisitorSum, overflow, tuple_argument, true>;
 
-    using ContainerT = KeySet; // JH FIXME - maybe - there's some field business below...
+    static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
+    using ContainerT = KeySet<std::conditional_t<is_generic_field, Field, KeyT>>;
     ContainerT keys_to_keep;
 
 public:
@@ -853,7 +877,13 @@ public:
         this->parameters = params_;
 
         for (const Field & f : keys_to_keep_values)
-            keys_to_keep.emplace(f); // and this - if we went for KeyT - how to handle?
+        {
+            if constexpr (is_generic_field)
+                keys_to_keep.emplace(f);
+            else
+                keys_to_keep.emplace(f.template safeGet<KeyT>());
+        }
+        
     }
         
 
@@ -869,7 +899,8 @@ public:
         }
     }
 
-    bool keepKey(const Field & key) const
+    template <typename T>
+    bool keepKey(const T & key) const
     {
         if (keys_to_keep.contains(key))
             return true;
@@ -877,17 +908,20 @@ public:
         // JH TODO... - some field business mentioned earlier
         // Determine whether the numerical value of the key can have both types (UInt or Int),
         // and use the other type with the same numerical value for keepKey verification.
-        if (key.getType() == Field::Types::UInt64)
+        if constexpr (is_generic_field)
         {
-            const auto & value = key.template safeGet<UInt64>();
-            if (value <= std::numeric_limits<Int64>::max())
-                return keys_to_keep.contains(Field(Int64(value)));
-        }
-        else if (key.getType() == Field::Types::Int64)
-        {
-            const auto & value = key.template safeGet<Int64>();
-            if (value >= 0)
-                return keys_to_keep.contains(Field(UInt64(value)));
+            if (key.getType() == Field::Types::UInt64)
+            {
+                const auto & value = key.template safeGet<UInt64>();
+                if (value <= std::numeric_limits<Int64>::max())
+                    return keys_to_keep.contains(Field(Int64(value)));
+            }
+            else if (key.getType() == Field::Types::Int64)
+            {
+                const auto & value = key.template safeGet<Int64>();
+                if (value >= 0)
+                    return keys_to_keep.contains(Field(UInt64(value)));
+            }
         }
 
         return false;
