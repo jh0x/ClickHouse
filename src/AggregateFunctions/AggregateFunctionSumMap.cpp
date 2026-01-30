@@ -246,7 +246,6 @@ public:
 
 // JH: TODO:
 
-
 #define COLUMN_TYPE_TRAITS_LIST(M) \
     M(Int8,   ColumnInt8)          \
     M(UInt8,  ColumnUInt8)         \
@@ -710,7 +709,13 @@ public:
             std::vector<typename State::Map::const_iterator> iterators;
             iterators.reserve(scratch.mapSize());
 
-            scratch.forEachCell([&iterators](auto it) {
+            scratch.forEachCell([&](auto it) {
+                if constexpr (compact)
+                {
+                    const auto& values = scratch.getValueByIndex(it->getMapped());
+                    if (!notCompacted(values))
+                        return;
+                }
                 iterators.push_back(it);
             });
 
