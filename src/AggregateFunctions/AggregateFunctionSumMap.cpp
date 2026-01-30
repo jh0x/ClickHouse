@@ -14,8 +14,6 @@
 #include <Common/HashTable/HashSet.h>
 #include <Common/FieldVisitorSum.h>
 #include <Common/assert_cast.h>
-#include "AggregateFunctions/IAggregateFunction_fwd.h"
-#include "Core/Field.h"
 #include <AggregateFunctions/IAggregateFunction.h>
 #include <AggregateFunctions/FactoryHelpers.h>
 
@@ -42,9 +40,26 @@ namespace ErrorCodes
 namespace
 {
 
+// JH TODO: Maybe not store Array as a whole?
+// Maybe runtime layout row blob? We'll know the size / types then
+// Or there's something like this already?
+//
+// Data stored as std::vector<char[]> or something
+// [Int8, UInt64, ...]
+// +---------------------------------...
+// | I8 | pad |        U64        |  ...
+// +---------------------------------...
+//  0    1..7      8..15           16...
+//
+// And have a layout info:
+// ColumnInfo: type, offset, size
+//             Int8,      0, 1
+//             UInt64,    8, 8
+//             ...
+
 template <typename Key>
 class AggregateFunctionMapDataT
-{ 
+{
 public:
     using KeyT = Key;
     using MappedIndex = UInt64;
@@ -97,7 +112,7 @@ public:
         typename Map::LookupResult it;
         bool inserted;
         work_map.emplace(key, it, inserted);
-        if(inserted) [[likely]]
+        if (inserted) [[likely]]
         {
             it->getMapped() = value_store.size();
             value_store.push_back(std::move(values));
@@ -350,6 +365,19 @@ protected:
         return false;
     }
 
+    template <bool tuple_argument>
+    static auto getArgumentColumns(const IColumn ** columns)
+    {
+        if constexpr (tuple_argument)
+        {
+            return assert_cast<const ColumnTuple *>(columns[0])->getColumns();
+        }
+        else
+        {
+            return columns;
+        }
+    }
+
     template <typename Visitor, bool overflow>
     static DataTypePtr createResultType(
         const DataTypePtr & keys_type_,
@@ -413,16 +441,14 @@ protected:
 
 
 template <typename Key, typename Derived, typename Visitor, bool overflow, bool tuple_argument, bool compact>
-class AggregateFunctionMapBaseT 
+class AggregateFunctionMapBaseT
     : public IAggregateFunctionDataHelper<AggregateFunctionMapDataT<Key>, Derived>
     , private AggregateFunctionMapCommon
 {
 private:
     using KeyT = Key;
     using State = AggregateFunctionMapDataT<KeyT>;
-
     static constexpr bool is_generic_field = std::is_same_v<KeyT, Field>;
-    
 public:
     using Base = IAggregateFunctionDataHelper<State, Derived>;
 
@@ -445,21 +471,9 @@ public:
 
     bool allocatesMemoryInArena() const override { return false; }
 
-    static auto getArgumentColumns(const IColumn ** columns)
-    {
-        if constexpr (tuple_argument)
-        {
-            return assert_cast<const ColumnTuple *>(columns[0])->getColumns();
-        }
-        else
-        {
-            return columns;
-        }
-    }
-
     void add(AggregateDataPtr __restrict place, const IColumn ** columns_, const size_t row_num, Arena *) const override
     {
-        const auto & columns = getArgumentColumns(columns_);
+        const auto & columns = getArgumentColumns<tuple_argument>(columns_);
 
         // Column 0 contains array of keys of known type
         const ColumnArray & array_column0 = assert_cast<const ColumnArray &>(*columns[0]);
@@ -468,8 +482,9 @@ public:
         const size_t keys_vec_offset = offsets0[row_num - 1];
         const size_t keys_vec_size = (offsets0[row_num] - keys_vec_offset);
 
-        const auto & key_column = [&]() -> decltype(auto) {
-            if constexpr(is_generic_field)
+        const auto & key_column = [&]() -> decltype(auto)
+        {
+            if constexpr (is_generic_field)
                 return key_column_generic;
             else
             {
@@ -497,8 +512,9 @@ public:
             for (size_t i = 0; i < keys_vec_size; ++i)
             {
                 Field value = value_column[values_vec_offset + i];
-                auto key = [&]{
-                    if constexpr(is_generic_field)
+                auto key = [&]
+                {
+                    if constexpr (is_generic_field)
                         return key_column[keys_vec_offset + i];
                     else
                         return key_column.getElement(keys_vec_offset + i);
@@ -651,8 +667,10 @@ public:
         // Final step does compaction of keys that have zero values, this mutates the state
         auto & scratch = this->data(place);
 
-        size_t size = [&]{
-            if constexpr (!compact) {
+        size_t size = [&]
+        {
+            if constexpr (!compact)
+            {
                 return scratch.mapSize();
             }
             else
@@ -683,7 +701,8 @@ public:
             to_values_arr.getData().reserve(size);
         }
 
-        if constexpr (State::isSorted) {
+        if constexpr (State::isSorted)
+        {
             // For Field keys, the map is already sorted (absl::btree_map), so we can iterate directly
             scratch.forEach([&](const auto & key, const Array & values)
             {
@@ -703,13 +722,16 @@ public:
                         to_values_col.insert(values[col]);
                 }
             });
-        } else {
+        }
+        else
+        {
             // For non-Field keys, we need to sort the results to ensure consistent order
             // Create a vector of iterators to the hash map entries and sort them by key
             std::vector<typename State::Map::const_iterator> iterators;
             iterators.reserve(scratch.mapSize());
 
-            scratch.forEachCell([&](auto it) {
+            scratch.forEachCell([&](auto it)
+            {
                 if constexpr (compact)
                 {
                     const auto& values = scratch.getValueByIndex(it->getMapped());
@@ -720,11 +742,13 @@ public:
             });
 
             std::sort(iterators.begin(), iterators.end(),
-                      [](const auto & a, const auto & b) {
-                          return a->getKey() < b->getKey();
-                      });
+                [](const auto & a, const auto & b)
+                {
+                    return a->getKey() < b->getKey();
+                });
 
-            for (const auto & it : iterators) {
+            for (const auto & it : iterators)
+            {
                 const auto & key = it->getKey();
                 const auto & values = scratch.getValueByIndex(it->getMapped());
 
@@ -883,9 +907,7 @@ public:
             else
                 keys_to_keep.emplace(f.template safeGet<KeyT>());
         }
-        
     }
-        
 
     static String getNameImpl()
     {
