@@ -960,7 +960,7 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::getTableProperti
     else if (create.as_table_function)
     {
         /// Table function without columns list.
-        auto table_function_ast = create.getChild(*create.as_table_function);
+        auto table_function_ast = create.as_table_function->ptr();
         auto table_function = TableFunctionFactory::instance().get(table_function_ast, getContext());
         properties.columns = table_function->getActualTableStructure(getContext(), /*is_insert_query*/ true);
     }
@@ -972,7 +972,7 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::getTableProperti
         /// Evaluate expressions (like currentDatabase() or tcpPort()) in dictionary source definition.
         NormalizeAndEvaluateConstantsVisitor::Data visitor_data{getContext()};
         NormalizeAndEvaluateConstantsVisitor visitor(visitor_data);
-        visitor.visit(create.dictionary->getChild(*create.dictionary->source));
+        visitor.visit(create.dictionary->source->ptr());
 
         return {};
     }
@@ -1348,7 +1348,7 @@ void InterpreterCreateQuery::setEngine(ASTCreateQuery & create) const
         }
         else if (as_create.as_table_function)
         {
-            create.set(create.as_table_function, as_create.getChild(*as_create.as_table_function));
+            create.set(create.as_table_function, as_create.as_table_function->ptr());
             return;
         }
         else if (as_create.storage)
@@ -1526,7 +1526,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
             auto guard = DatabaseCatalog::instance().getDDLGuard(database_name, create.getTable(), database.get());
             create.setDatabase(database_name);
             guard->releaseTableLock();
-            return database->tryEnqueueReplicatedDDL(query_ptr, getContext(), QueryFlags{ .internal = internal, .distributed_backup_restore = is_restore_from_backup });
+            return database->tryEnqueueReplicatedDDL(query_ptr, getContext(), QueryFlags{ .internal = internal, .distributed_backup_restore = is_restore_from_backup }, std::move(guard));
         }
 
         if (!create.cluster.empty())
@@ -1719,7 +1719,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
         auto guard = DatabaseCatalog::instance().getDDLGuard(create.getDatabase(), create.getTable(), database.get());
         assertOrSetUUID(create, database);
         guard->releaseTableLock();
-        return database->tryEnqueueReplicatedDDL(query_ptr, getContext(), QueryFlags{ .internal = internal, .distributed_backup_restore = is_restore_from_backup });
+        return database->tryEnqueueReplicatedDDL(query_ptr, getContext(), QueryFlags{ .internal = internal, .distributed_backup_restore = is_restore_from_backup }, std::move(guard));
     }
 
     if (!create.cluster.empty())
@@ -1988,7 +1988,7 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
     /// NOTE: CREATE query may be rewritten by Storage creator or table function
     if (create.as_table_function)
     {
-        auto table_function_ast = create.getChild(*create.as_table_function);
+        auto table_function_ast = create.as_table_function->ptr();
         auto table_function = TableFunctionFactory::instance().get(table_function_ast, getContext());
 
         if (!table_function->canBeUsedToCreateTable())
