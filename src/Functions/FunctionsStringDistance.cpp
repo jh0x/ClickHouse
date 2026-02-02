@@ -7,6 +7,7 @@
 #include <Common/PODArray.h>
 #include <Common/UTF8Helpers.h>
 #include <Common/iota.h>
+#include <Common/HashTable/HashMap.h>
 #include <Common/HashTable/HashSet.h>
 
 #include <algorithm>
@@ -237,6 +238,86 @@ struct ByteJaccardIndexImpl
 static constexpr size_t max_string_size = 1u << 16;
 
 template<bool is_utf8>
+struct ByteEditDistanceMyersImpl
+{
+    using SymbolT = std::conditional_t<is_utf8, UInt32, UInt8>;
+    using Word = UInt64;
+
+    struct ScratchASCII
+    {
+        Word ascii_masks[256]{};
+    };
+    struct ScratchUTF8
+    {
+        HashMapWithStackMemory<UInt32, Word, DefaultHash<UInt32>, 6> unicode_masks;
+    };
+
+    using ScratchT = std::conditional_t<is_utf8, ScratchUTF8, ScratchASCII>;
+
+    static UInt32 distance(const SymbolT* __restrict haystack, UInt32 haystack_len, const SymbolT* __restrict needle, UInt32 needle_len)
+    {
+        ScratchT scratch;
+
+        if constexpr (!is_utf8)
+        {
+            for (size_t i = 0; i < needle_len; ++i)
+                scratch.ascii_masks[needle[i]] |= Word(1) << i;
+        }
+        else
+        {
+            for (size_t i = 0; i < needle_len; ++i)
+                scratch.unicode_masks[needle[i]] = scratch.unicode_masks[needle[i]] | (Word(1) << i);
+        }
+
+        Word VP = ~Word(0);
+        Word VN = 0;
+        uint32_t score = needle_len;
+
+        const Word highest_bit = Word(1) << (needle_len - 1);
+
+        // From: Bit-Parallel Approximate String Matching Algorithms with Transposition (Heikki Hyyro)
+        for (size_t i = 0; i < haystack_len; ++i)
+        {
+            // PM = pattern match mask for current text symbol
+            // PM[j] = 1 iff needle[j] == haystack[i]
+            Word PM;
+            if constexpr (!is_utf8)
+            {
+                PM = scratch.ascii_masks[haystack[i]];
+            }
+            else
+            {
+                auto it = scratch.unicode_masks.find(haystack[i]);
+                PM = (it == scratch.unicode_masks.end()) ? 0 : it->getMapped();
+            }
+
+            // X combines matches and vertical negative deltas
+            Word X = PM | VN;
+            // D0: diagonal zero-delta vector
+            // D0[j] = 1 iff D[i][j] == D[i-1][j-1]
+            Word D0 = (((X & VP) + VP) ^ VP) | X;
+            // HP: horizontal positive deltas
+            // HP[j] = 1 iff D[i][j] - D[i][j-1] == +1
+            Word HP = VN | ~(D0 | VP);
+            // HN: horizontal negative deltas
+            // HN[j] = 1 iff D[i][j] - D[i][j-1] == -1
+            Word HN = VP & D0;
+
+            // Update the edit distance score using the last pattern position (corresponds to D[m][i])
+            if (HP & highest_bit) ++score;
+            if (HN & highest_bit) --score;
+
+            // Update vertical positive deltas for next column
+            VP = (HN << 1) | ~(D0 | ((HP << 1) | 1));
+            // Update vertical negative deltas for next column
+            VN = ((HP << 1) | 1) & D0;
+        }
+
+        return score;
+    }
+};
+
+template<bool is_utf8>
 struct ByteEditDistanceImpl
 {
     using ResultType = UInt64;
@@ -263,6 +344,34 @@ struct ByteEditDistanceImpl
             haystack_size = haystack_utf8.size();
             needle_size = needle_utf8.size();
         }
+        if (needle_size > haystack_size)
+        {
+            std::swap(needle_size, haystack_size);
+            if constexpr (is_utf8)
+            {
+                std::swap(needle_utf8, haystack_utf8);
+            }
+            else
+            {
+                std::swap(needle, haystack);
+            }
+        }
+
+        if (needle_size <= 64)
+        {
+            if constexpr (is_utf8)
+            {
+                return ByteEditDistanceMyersImpl<is_utf8>::distance(
+                    haystack_utf8.data(), static_cast<UInt32>(haystack_size), needle_utf8.data(), static_cast<UInt32>(needle_size));
+            }
+            else
+            {
+                return ByteEditDistanceMyersImpl<is_utf8>::distance(
+                    reinterpret_cast<const UInt8 *>(haystack), static_cast<UInt32>(haystack_size),
+                    reinterpret_cast<const UInt8 *>(needle), static_cast<UInt32>(needle_size));
+            }
+        }
+
 
         PaddedPODArray<WorkingType> distances0(haystack_size + 1);
         PaddedPODArray<WorkingType> distances1(haystack_size + 1);
