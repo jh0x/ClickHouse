@@ -12,7 +12,7 @@
 #define FAST_HEX_AVX 1
 #define FAST_HEX_AVX2 1
 #endif
-#define FAST_HEX_USE_NAMESPACE
+#define FAST_HEX_USE_NAMESPACE 1
 #include <fast_hex/fast_hex_inline.hpp>
 
 namespace CityHash_v1_0_2 { struct uint128; }
