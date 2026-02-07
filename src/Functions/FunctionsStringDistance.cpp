@@ -237,11 +237,11 @@ struct ByteJaccardIndexImpl
 
 static constexpr size_t max_string_size = 1u << 16;
 
-template<bool is_utf8>
+template<bool is_utf8, typename WorkType = UInt64>
 struct ByteEditDistanceMyersImpl
 {
     using SymbolT = std::conditional_t<is_utf8, UInt32, UInt8>;
-    using Word = UInt64;
+    using Word = WorkType;
 
     struct ScratchASCII
     {
@@ -288,7 +288,7 @@ struct ByteEditDistanceMyersImpl
             else
             {
                 auto it = scratch.unicode_masks.find(haystack[i]);
-                PM = (it == scratch.unicode_masks.end()) ? 0 : it->getMapped();
+                PM = (it == scratch.unicode_masks.end()) ? Word(0) : it->getMapped();
             }
 
             // X combines matches and vertical negative deltas
@@ -357,21 +357,33 @@ struct ByteEditDistanceImpl
             }
         }
 
-        if (needle_size <= 64)
-        {
-            if constexpr (is_utf8)
-            {
-                return ByteEditDistanceMyersImpl<is_utf8>::distance(
-                    haystack_utf8.data(), static_cast<UInt32>(haystack_size), needle_utf8.data(), static_cast<UInt32>(needle_size));
-            }
-            else
-            {
-                return ByteEditDistanceMyersImpl<is_utf8>::distance(
-                    reinterpret_cast<const UInt8 *>(haystack), static_cast<UInt32>(haystack_size),
-                    reinterpret_cast<const UInt8 *>(needle), static_cast<UInt32>(needle_size));
-            }
-        }
+        #define DISPATCH_SHORT_MYERS(T)                                              \
+        if (needle_size <= sizeof(T) * CHAR_BIT)                                     \
+        {                                                                            \
+            if constexpr (is_utf8)                                                   \
+            {                                                                        \
+                return ByteEditDistanceMyersImpl<is_utf8,T>::distance(                 \
+                    haystack_utf8.data(),                                            \
+                    static_cast<UInt32>(haystack_size),                              \
+                    needle_utf8.data(),                                              \
+                    static_cast<UInt32>(needle_size));                               \
+            }                                                                        \
+            else                                                                     \
+            {                                                                        \
+                return ByteEditDistanceMyersImpl<is_utf8,T>::distance(                 \
+                    reinterpret_cast<const UInt8 *>(haystack),                       \
+                    static_cast<UInt32>(haystack_size),                              \
+                    reinterpret_cast<const UInt8 *>(needle),                         \
+                    static_cast<UInt32>(needle_size));                               \
+            }                                                                        \
+        }                                                                            \
 
+        DISPATCH_SHORT_MYERS(UInt64)
+        else
+        DISPATCH_SHORT_MYERS(UInt128)
+        else
+        DISPATCH_SHORT_MYERS(UInt256)
+        #undef DISPATCH_SHORT_MYERS
 
         PaddedPODArray<WorkingType> distances0(haystack_size + 1);
         PaddedPODArray<WorkingType> distances1(haystack_size + 1);
