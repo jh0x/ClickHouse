@@ -62,7 +62,7 @@ struct HexImpl
         }
     }
 
-    static void executeOneString(const UInt8 * pos, const UInt8 * end, char *& out, bool reverse_order = false)
+    static ALWAYS_INLINE inline void executeOneString(const UInt8 * pos, const UInt8 * end, char *& out, bool reverse_order = false)
     {
         if (!reverse_order)
         {
