@@ -94,11 +94,17 @@ inline void encode_hex_string(uint8_t* dst, const uint8_t* src, size_t size, Cas
 {
     heks::heks_detail::encodeHexVecImpl<Case::value>(dst, src, heks::RawLength{size});
 })
+#if defined(__arm__) || defined(__aarch64__)
+#define DECODE_HEX_IMPL_FUNCTION_TO_USE heks::decodeHexLUT
+#else
+#define DECODE_HEX_IMPL_FUNCTION_TO_USE heks::decodeHexLUT4
+#endif
 DECLARE_DEFAULT_CODE(
 inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
 {
-    heks::decodeHexLUT4(dst, src, heks::RawLength{size});
+    DECODE_HEX_IMPL_FUNCTION_TO_USE(dst, src, heks::RawLength{size});
 })
+#undef DECODE_HEX_IMPL_FUNCTION_TO_USE
 DECLARE_AVX2_SPECIFIC_CODE(
 inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
 {
@@ -449,7 +455,8 @@ inline std::string hexString(const void * data, size_t size)
     std::string s(size * 2, '\0');
     auto * dst = reinterpret_cast<uint8_t *>(s.data());
     #if USE_MULTITARGET_CODE
-    if (DB::isArchSupported(DB::TargetArch::AVX2))
+    constexpr size_t HEX_AVX2_THRESHOLD = 16;
+    if (size >= HEX_AVX2_THRESHOLD && DB::isArchSupported(DB::TargetArch::AVX2))
     {
         TargetSpecific::AVX2::encode_hex_string(dst, p, size, heks::lower);
         return s;
@@ -472,7 +479,8 @@ inline void hexString(UInt8* output, const void * data, size_t size)
             return heks::upper;
     };
     #if USE_MULTITARGET_CODE
-    if (DB::isArchSupported(DB::TargetArch::AVX2))
+    constexpr size_t HEX_AVX2_THRESHOLD = 16;
+    if (size >= HEX_AVX2_THRESHOLD && DB::isArchSupported(DB::TargetArch::AVX2))
     {
         TargetSpecific::AVX2::encode_hex_string(dst, p, size, get_case());
         return;
@@ -487,7 +495,8 @@ inline void unHexString(UInt8* output, const UInt8* input, size_t raw_size)
     auto* dst = reinterpret_cast<uint8_t*>(output);
     const auto* src = reinterpret_cast<const uint8_t*>(input);
     #if USE_MULTITARGET_CODE
-    if (DB::isArchSupported(DB::TargetArch::AVX2))
+    constexpr size_t HEX_AVX2_THRESHOLD = 32;
+    if (raw_size >= HEX_AVX2_THRESHOLD && DB::isArchSupported(DB::TargetArch::AVX2))
     {
         TargetSpecific::AVX2::decode_hex_string(dst, src, raw_size);
         return;
