@@ -11,6 +11,7 @@
 #include <Common/HashTable/HashSet.h>
 
 #include <algorithm>
+#include <climits>
 
 #ifdef __SSE4_2__
 #    include <nmmintrin.h>
@@ -317,14 +318,79 @@ struct ByteEditDistanceMyersImpl
     }
 };
 
-template<bool is_utf8>
+
+template <bool is_utf8>
+struct ByteEditDistanceDPImpl
+{
+    using WorkingType = UInt32;
+    using SymbolT = std::conditional_t<is_utf8, UInt32, UInt8>;
+
+    static UInt32 distance(const SymbolT * __restrict haystack, UInt32 haystack_size, const SymbolT * __restrict needle, UInt32 needle_size)
+    {
+        PaddedPODArray<WorkingType> distances0(haystack_size + 1);
+        PaddedPODArray<WorkingType> distances1(haystack_size + 1);
+        auto * __restrict prev = distances0.data();
+        auto * __restrict curr = distances1.data();
+
+        WorkingType substitution = 0;
+        WorkingType insertion = 0;
+        WorkingType deletion = 0;
+
+        iota(distances0.data(), haystack_size + 1, WorkingType(0));
+
+        const auto has_tail = (haystack_size % 2) == 1;
+
+        for (size_t pos_needle = 0; pos_needle < needle_size; ++pos_needle)
+        {
+            curr[0] = static_cast<WorkingType>(pos_needle + 1);
+
+            const auto needle_char = needle[pos_needle];
+
+            size_t pos_haystack = 0;
+            for (; pos_haystack + 1 < haystack_size; pos_haystack += 2)
+            {
+                // First:
+                deletion = prev[pos_haystack + 1] + 1;
+                insertion = curr[pos_haystack] + 1;
+                substitution = prev[pos_haystack];
+
+                if (needle_char != *(haystack + pos_haystack))
+                    substitution += 1;
+
+                curr[pos_haystack + 1] = std::min({deletion, substitution, insertion});
+                // Second:
+                deletion = prev[pos_haystack + 2] + 1;
+                insertion = curr[pos_haystack + 1] + 1;
+                substitution = prev[pos_haystack + 1];
+
+                if (needle_char != *(haystack + pos_haystack + 1))
+                    substitution += 1;
+                curr[pos_haystack + 2] = std::min({deletion, substitution, insertion});
+            }
+            if (has_tail)
+            {
+                deletion = prev[pos_haystack + 1] + 1;
+                insertion = curr[pos_haystack] + 1;
+                substitution = prev[pos_haystack];
+                if (needle_char != *(haystack + pos_haystack))
+                    substitution += 1;
+                curr[pos_haystack + 1] = std::min({deletion, substitution, insertion});
+            }
+            std::swap(curr, prev);
+        }
+
+        return prev[haystack_size];
+    }
+};
+
+template <bool is_utf8>
 struct ByteEditDistanceImpl
 {
     using ResultType = UInt64;
     using WorkingType = UInt32;
+    using SymbolT = std::conditional_t<is_utf8, UInt32, UInt8>;
 
-    static ResultType process(
-        const char * __restrict haystack, size_t haystack_size, const char * __restrict needle, size_t needle_size)
+    static ResultType process(const char * __restrict haystack, size_t haystack_size, const char * __restrict needle, size_t needle_size)
     {
         if (haystack_size == 0 || needle_size == 0)
             return haystack_size + needle_size;
@@ -333,7 +399,8 @@ struct ByteEditDistanceImpl
         if (haystack_size > max_string_size || needle_size > max_string_size)
             throw Exception(
                 ErrorCodes::TOO_LARGE_STRING_SIZE,
-                "The string size is too big for function editDistance, should be at most {}", max_string_size);
+                "The string size is too big for function editDistance, should be at most {}",
+                max_string_size);
 
         PaddedPODArray<UInt32> haystack_utf8;
         PaddedPODArray<UInt32> needle_utf8;
@@ -357,115 +424,45 @@ struct ByteEditDistanceImpl
             }
         }
 
-        #define DISPATCH_SHORT_MYERS(T)                                              \
-        if (needle_size <= sizeof(T) * CHAR_BIT)                                     \
-        {                                                                            \
-            if constexpr (is_utf8)                                                   \
-            {                                                                        \
-                return ByteEditDistanceMyersImpl<is_utf8,T>::distance(                 \
-                    haystack_utf8.data(),                                            \
-                    static_cast<UInt32>(haystack_size),                              \
-                    needle_utf8.data(),                                              \
-                    static_cast<UInt32>(needle_size));                               \
-            }                                                                        \
-            else                                                                     \
-            {                                                                        \
-                return ByteEditDistanceMyersImpl<is_utf8,T>::distance(                 \
-                    reinterpret_cast<const UInt8 *>(haystack),                       \
-                    static_cast<UInt32>(haystack_size),                              \
-                    reinterpret_cast<const UInt8 *>(needle),                         \
-                    static_cast<UInt32>(needle_size));                               \
-            }                                                                        \
-        }                                                                            \
-
-        DISPATCH_SHORT_MYERS(UInt64)
-        else
-        DISPATCH_SHORT_MYERS(UInt128)
-        else
-        DISPATCH_SHORT_MYERS(UInt256)
-        #undef DISPATCH_SHORT_MYERS
-
-        PaddedPODArray<WorkingType> distances0(haystack_size + 1);
-        PaddedPODArray<WorkingType> distances1(haystack_size + 1);
-        auto* __restrict prev = distances0.data();
-        auto* __restrict curr = distances1.data();
-
-        WorkingType substitution = 0;
-        WorkingType insertion = 0;
-        WorkingType deletion = 0;
-
-        iota(distances0.data(), haystack_size + 1, WorkingType(0));
-
-        const auto has_tail = (haystack_size % 2) == 1;
-
-        for (size_t pos_needle = 0; pos_needle < needle_size; ++pos_needle)
+        auto dispatchMyers = [&]<typename T>()
         {
-            curr[0] = static_cast<WorkingType>(pos_needle + 1);
-
-            const auto needle_char = [&]{
-                if constexpr (is_utf8)
-                    return needle_utf8[pos_needle];
-                else
-                    return *(needle + pos_needle);
-            }();
-
-            size_t pos_haystack = 0;
-            for (; pos_haystack + 1 < haystack_size; pos_haystack += 2)
+            if constexpr (is_utf8)
             {
-                // First:
-                deletion = prev[pos_haystack + 1] + 1;
-                insertion = curr[pos_haystack] + 1;
-                substitution = prev[pos_haystack];
-
-                if constexpr (is_utf8)
-                {
-                    if (needle_char != haystack_utf8[pos_haystack])
-                        substitution += 1;
-                }
-                else
-                {
-                    if (needle_char != *(haystack + pos_haystack))
-                        substitution += 1;
-                }
-                curr[pos_haystack + 1] = std::min({deletion, substitution, insertion});
-                // Second:
-                deletion = prev[pos_haystack + 2] + 1;
-                insertion = curr[pos_haystack + 1] + 1;
-                substitution = prev[pos_haystack + 1];
-
-                if constexpr (is_utf8)
-                {
-                    if (needle_char != haystack_utf8[pos_haystack + 1])
-                        substitution += 1;
-                }
-                else
-                {
-                    if (needle_char != *(haystack + pos_haystack + 1))
-                        substitution += 1;
-                }
-                curr[pos_haystack + 2] = std::min({deletion, substitution, insertion});
+                return ByteEditDistanceMyersImpl<is_utf8, T>::distance(
+                    haystack_utf8.data(), static_cast<UInt32>(haystack_size), needle_utf8.data(), static_cast<UInt32>(needle_size));
             }
-            if (has_tail)
+            else
             {
-                deletion = prev[pos_haystack + 1] + 1;
-                insertion = curr[pos_haystack] + 1;
-                substitution = prev[pos_haystack];
-                if constexpr (is_utf8)
-                {
-                    if (needle_char != haystack_utf8[pos_haystack])
-                        substitution += 1;
-                }
-                else
-                {
-                    if (needle_char != *(haystack + pos_haystack))
-                        substitution += 1;
-                }
-                curr[pos_haystack + 1] = std::min({deletion, substitution, insertion});
+                return ByteEditDistanceMyersImpl<is_utf8, T>::distance(
+                    reinterpret_cast<const SymbolT *>(haystack),
+                    static_cast<UInt32>(haystack_size),
+                    reinterpret_cast<const SymbolT *>(needle),
+                    static_cast<UInt32>(needle_size));
             }
-            std::swap(curr, prev);
+        };
+
+        if (needle_size <= sizeof(UInt64) * CHAR_BIT)
+            return dispatchMyers.template operator()<UInt64>();
+        else if (needle_size <= sizeof(UInt128) * CHAR_BIT)
+            return dispatchMyers.template operator()<UInt128>();
+        else if (needle_size <= sizeof(UInt256) * CHAR_BIT)
+            return dispatchMyers.template operator()<UInt256>();
+        else
+        {
+            if constexpr (is_utf8)
+            {
+                return ByteEditDistanceDPImpl<is_utf8>::distance(
+                    haystack_utf8.data(), static_cast<UInt32>(haystack_size), needle_utf8.data(), static_cast<UInt32>(needle_size));
+            }
+            else
+            {
+                return ByteEditDistanceDPImpl<is_utf8>::distance(
+                    reinterpret_cast<const SymbolT *>(haystack),
+                    static_cast<UInt32>(haystack_size),
+                    reinterpret_cast<const SymbolT *>(needle),
+                    static_cast<UInt32>(needle_size));
+            }
         }
-
-        return prev[haystack_size];
     }
 };
 
