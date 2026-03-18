@@ -92,7 +92,16 @@ DECLARE_X86_64_V3_SPECIFIC_CODE(
 template <class Case>
 inline void encode_hex_string(uint8_t* dst, const uint8_t* src, size_t size, Case)
 {
-    heks::heks_detail::encodeHexVecImpl<Case::value>(dst, src, heks::RawLength{size});
+    if (size >= 16)
+        heks::heks_detail::encodeHexVecImpl<Case::value>(dst, src, heks::RawLength{size});
+    else if (size >= 8)
+    {
+        heks::heks_detail::encodeHex8Fast<Case::value>(dst, src);
+        if (size > 8)
+            heks::heks_detail::encodeHexImpl<Case::value>(dst + 16, src + 8, heks::RawLength{size - 8});
+    }
+    else
+        heks::heks_detail::encodeHexImpl<Case::value>(dst, src, heks::RawLength{size});
 })
 DECLARE_DEFAULT_CODE(
 inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
@@ -102,7 +111,10 @@ inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
 DECLARE_X86_64_V3_SPECIFIC_CODE(
 inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
 {
-    heks::decodeHexVec(dst, src, heks::RawLength{size});
+    if (size >= 32)
+        heks::decodeHexVec(dst, src, heks::RawLength{size});
+    else
+        heks::decodeHexLUT4(dst, src, heks::RawLength{size});
 })
 DECLARE_X86_64_V3_SPECIFIC_CODE(
 template <class Case>
