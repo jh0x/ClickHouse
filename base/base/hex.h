@@ -92,16 +92,7 @@ DECLARE_X86_64_V3_SPECIFIC_CODE(
 template <class Case>
 inline void encode_hex_string(uint8_t* dst, const uint8_t* src, size_t size, Case)
 {
-    if (size >= 16)
-        heks::heks_detail::encodeHexVecImpl<Case::value>(dst, src, heks::RawLength{size});
-    else if (size >= 8)
-    {
-        heks::heks_detail::encodeHex8Fast<Case::value>(dst, src);
-        if (size > 8)
-            heks::heks_detail::encodeHexImpl<Case::value>(dst + 16, src + 8, heks::RawLength{size - 8});
-    }
-    else
-        heks::heks_detail::encodeHexImpl<Case::value>(dst, src, heks::RawLength{size});
+    heks::heks_detail::encodeHexVecImpl<Case::value>(dst, src, heks::RawLength{size});
 })
 DECLARE_DEFAULT_CODE(
 inline void decode_hex_string(uint8_t* dst, const uint8_t* src, size_t size)
@@ -442,6 +433,11 @@ inline std::string hexString(const void * data, size_t size)
     const auto * p = reinterpret_cast<const uint8_t *>(data);
     std::string s(size * 2, '\0');
     auto * dst = reinterpret_cast<uint8_t *>(s.data());
+    if (size < 16)
+    {
+        heks::heks_detail::encodeHexImpl<heks::heks_detail::HexCase::Lower>(dst, p, heks::RawLength{size});
+        return s;
+    }
     #if USE_MULTITARGET_CODE
     if (DB::isArchSupported(DB::TargetArch::x86_64_v3))
     {
@@ -459,6 +455,12 @@ inline void hexString(UInt8* output, const void * data, size_t size)
 {
     const auto * p = reinterpret_cast<const uint8_t *>(data);
     auto * dst = reinterpret_cast<uint8_t *>(output);
+    if (size < 16)
+    {
+        constexpr auto case_type = Lower ? heks::heks_detail::HexCase::Lower : heks::heks_detail::HexCase::Upper;
+        heks::heks_detail::encodeHexImpl<case_type>(dst, p, heks::RawLength{size});
+        return;
+    }
     auto get_case = []{
         if constexpr (Lower)
             return heks::lower;
@@ -480,6 +482,11 @@ inline void unHexString(UInt8* output, const UInt8* input, size_t raw_size)
 {
     auto* dst = reinterpret_cast<uint8_t*>(output);
     const auto* src = reinterpret_cast<const uint8_t*>(input);
+    if (raw_size < 32)
+    {
+        heks::decodeHexLUT4(dst, src, heks::RawLength{raw_size});
+        return;
+    }
     #if USE_MULTITARGET_CODE
     if (DB::isArchSupported(DB::TargetArch::x86_64_v3))
     {
