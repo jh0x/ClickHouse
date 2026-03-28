@@ -6660,6 +6660,9 @@ Approximate probability of failure for a keeper request during insert. Valid val
     DECLARE(UInt64, insert_keeper_fault_injection_seed, 0, R"(
 0 - random seed, otherwise the setting value
 )", 0) \
+    DECLARE(UInt64, bernoulli_sample_seed, 0, R"(
+Seed for Bernoulli sampling. 0 means random, nonzero means deterministic.
+)", 0) \
     DECLARE(Bool, force_aggregation_in_order, false, R"(
 The setting is used by the server itself to support distributed queries. Do not change it manually, because it will break normal operations. (Forces use of aggregation in order on remote nodes during distributed aggregation).
 )", IMPORTANT) \
@@ -7541,6 +7544,9 @@ If it is set to true, and the conditions of `join_to_sort_minimum_perkey_rows` a
 )", EXPERIMENTAL) \
     DECLARE(Bool, allow_experimental_json_lazy_type_hints, false, R"(
 Enable experimental lazy type hints for JSON type. This feature allows optimizing JSON type conversions by deferring type hint evaluation.
+)", EXPERIMENTAL) \
+    DECLARE(Bool, allow_experimental_bernoulli_sample, false, R"(
+Allow using Bernoulli sampling when SAMPLE is applied to a MergeTree table without a SAMPLE BY key. When enabled, each row is independently selected with the given probability instead of throwing an error.
 )", EXPERIMENTAL) \
      \
     DECLARE_WITH_ALIAS(Bool, allow_statistics_optimize, true, R"(

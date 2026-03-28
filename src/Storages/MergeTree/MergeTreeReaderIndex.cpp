@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeReaderIndex.h>
 
+#include <Storages/MergeTree/BernoulliGranuleFilter.h>
 #include <Storages/MergeTree/MergeTreeIndexReadResultPool.h>
 
 namespace DB
@@ -10,7 +11,11 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
-MergeTreeReaderIndex::MergeTreeReaderIndex(const IMergeTreeReader * main_reader_, MergeTreeIndexReadResultPtr index_read_result_, const PaddedPODArray<UInt64> * lazy_materializing_rows_)
+MergeTreeReaderIndex::MergeTreeReaderIndex(
+    const IMergeTreeReader * main_reader_,
+    MergeTreeIndexReadResultPtr index_read_result_,
+    const PaddedPODArray<UInt64> * lazy_materializing_rows_,
+    BernoulliGranuleFilterPtr bernoulli_filter_)
     : IMergeTreeReader(
           main_reader_->data_part_info_for_read,
           {},
@@ -24,9 +29,10 @@ MergeTreeReaderIndex::MergeTreeReaderIndex(const IMergeTreeReader * main_reader_
     , index_read_result(std::move(index_read_result_))
     , lazy_materializing_rows(lazy_materializing_rows_)
     , main_reader(main_reader_)
+    , bernoulli_filter(std::move(bernoulli_filter_))
 {
-    chassert(lazy_materializing_rows || index_read_result);
-    chassert(lazy_materializing_rows || index_read_result->skip_index_read_result || index_read_result->projection_index_read_result);
+    chassert(lazy_materializing_rows || index_read_result || bernoulli_filter);
+    chassert(lazy_materializing_rows || bernoulli_filter || index_read_result->skip_index_read_result || index_read_result->projection_index_read_result);
 }
 
 size_t MergeTreeReaderIndex::readRows(
@@ -71,11 +77,13 @@ size_t MergeTreeReaderIndex::readRows(
         max_rows_to_read = std::min(max_rows_to_read, total_rows - starting_row);
     else
         max_rows_to_read = 0;
+
+    ColumnPtr & filter_column = res_columns.front();
+    size_t filter_size_before = filter_column ? static_cast<const ColumnUInt8 &>(*filter_column).getData().size() : 0;
+
     /// If projection index is available, attempt to construct the filter column
     if (index_read_result && index_read_result->projection_index_read_result)
     {
-        ColumnPtr & filter_column = res_columns.front();
-
         if (filter_column == nullptr)
         {
             filter_column = ColumnUInt8::create();
@@ -102,7 +110,6 @@ size_t MergeTreeReaderIndex::readRows(
     {
         // std::cerr << "MergeTreeReaderIndex::readRows lazy_materializing_rows " << lazy_materializing_rows->size() << "\n";
         // std::cerr << "from " << starting_row << " max_to_read " << max_rows_to_read << "\n";
-        ColumnPtr & filter_column = res_columns.front();
 
         if (filter_column == nullptr)
         {
@@ -142,6 +149,31 @@ size_t MergeTreeReaderIndex::readRows(
         }
     }
 
+    /// Apply Bernoulli sampling filter.
+    if (bernoulli_filter && max_rows_to_read > 0)
+    {
+        if (filter_column == nullptr)
+            filter_column = ColumnUInt8::create();
+
+        auto mutable_filter_column = filter_column->assumeMutable();
+        auto & filter_data = static_cast<ColumnUInt8 &>(*mutable_filter_column).getData();
+
+        /// If projection or lazy-materializing filters above already appended entries
+        /// for these rows, AND Bernoulli with them. Otherwise just append.
+        bool has_prior_filter = filter_data.size() > filter_size_before;
+        if (has_prior_filter)
+        {
+            size_t filter_start = filter_data.size() - max_rows_to_read;
+            bernoulli_filter->andWithFilter(filter_data, filter_start, starting_row, max_rows_to_read);
+        }
+        else
+        {
+            bernoulli_filter->appendToFilter(filter_data, starting_row, max_rows_to_read);
+        }
+
+        filter_column = std::move(mutable_filter_column);
+    }
+
     current_row += max_rows_to_read;
     return max_rows_to_read;
 }
@@ -175,6 +207,9 @@ bool MergeTreeReaderIndex::canSkipMark(size_t mark, size_t /*current_task_last_m
         if (index_read_result->projection_index_read_result->rangeAllZero(begin, end))
             return true;
     }
+
+    if (bernoulli_filter && bernoulli_filter->canSkipMark(mark))
+        return true;
 
     return false;
 }

@@ -47,6 +47,7 @@
 #include <Storages/MergeTree/MergeTreeReadPoolParallelReplicas.h>
 #include <Storages/MergeTree/MergeTreeReadPoolParallelReplicasInOrder.h>
 #include <Storages/MergeTree/MergeTreeIndexReadResultPool.h>
+#include <Storages/MergeTree/BernoulliGranuleFilter.h>
 #include <Storages/MergeTree/MergeTreeReadPoolProjectionIndex.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Storages/MergeTree/MergeTreeSource.h>
@@ -54,6 +55,7 @@
 #include <Storages/MergeTree/RequestResponse.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 #include <Storages/VirtualColumnUtils.h>
+#include <Common/HashTable/Hash.h>
 #include <Common/JSONBuilder.h>
 #include <Common/logger_useful.h>
 #include <Common/thread_local_rng.h>
@@ -2443,7 +2445,6 @@ ReadFromMergeTree::AnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
         metadata_snapshot->getColumns().getAllPhysical(),
         res_parts,
         indexes->key_condition,
-        data,
         metadata_snapshot,
         context_,
         log);
@@ -2954,7 +2955,7 @@ ReadFromMergeTree::AnalysisResult & ReadFromMergeTree::getAnalysisResultImpl() c
 
 bool ReadFromMergeTree::isQueryWithSampling() const
 {
-    if (context->getSettingsRef()[Setting::parallel_replicas_count] > 1 && data.supportsSampling())
+    if (context->getSettingsRef()[Setting::parallel_replicas_count] > 1 && data.getInMemoryMetadataPtr()->hasSamplingKey())
         return true;
 
     if (query_info.table_expression_modifiers)
@@ -3497,6 +3498,27 @@ void ReadFromMergeTree::initializePipeline(QueryPipelineBuilder & pipeline, cons
             std::move(projection_index_read_desc.read_ranges),
             std::move(index_read_result_pool),
             std::move(part_remaining_marks));
+    }
+
+    /// Pre-compute per-part Bernoulli filters before distributing work to threads.
+    /// This ensures thread-count-independent determinism: the same seed always
+    /// produces the same sampled rows regardless of max_threads.
+    if (result.sampling.use_bernoulli_sampling)
+    {
+        /// seed=0 means random; pick one base seed for the whole query.
+        UInt64 base_seed = result.sampling.bernoulli_seed
+            ? *result.sampling.bernoulli_seed
+            : thread_local_rng();
+
+        for (auto & part_with_ranges : result.parts_with_ranges)
+        {
+            UInt64 part_seed = intHash64(base_seed ^ part_with_ranges.part_index_in_query);
+            part_with_ranges.bernoulli_filter = BernoulliGranuleFilter::build(
+                *part_with_ranges.data_part->index_granularity,
+                part_with_ranges.data_part->rows_count,
+                result.sampling.bernoulli_probability,
+                part_seed);
+        }
     }
 
     Pipe pipe = output_each_partition_through_separate_port

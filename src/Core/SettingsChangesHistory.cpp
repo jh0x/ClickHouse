@@ -44,6 +44,8 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"distributed_index_analysis_only_on_coordinator", false, false, "New setting."},
             {"enable_materialized_cte", false, false, "New setting"},
             {"finalize_projection_parts_synchronously", false, false, "New setting to finalize projection parts synchronously during INSERT to reduce peak memory usage."},
+            {"allow_experimental_bernoulli_sample", false, false, "New setting to allow Bernoulli sampling on MergeTree tables without a SAMPLE BY key."},
+            {"bernoulli_sample_seed", 0, 0, "New setting for deterministic Bernoulli sampling seed."},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {

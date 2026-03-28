@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Storages/MergeTree/BernoulliGranuleFilter_fwd.h>
 #include <Storages/MergeTree/IMergeTreeReader.h>
 
 namespace DB
@@ -20,7 +21,11 @@ class MergeTreeReaderIndex : public IMergeTreeReader
 public:
     using MatchingMarks = std::vector<bool>;
 
-    MergeTreeReaderIndex(const IMergeTreeReader * main_reader_, MergeTreeIndexReadResultPtr index_read_result_, const PaddedPODArray<UInt64> * lazy_materializing_rows_);
+    MergeTreeReaderIndex(
+        const IMergeTreeReader * main_reader_,
+        MergeTreeIndexReadResultPtr index_read_result_,
+        const PaddedPODArray<UInt64> * lazy_materializing_rows_,
+        BernoulliGranuleFilterPtr bernoulli_filter_ = nullptr);
 
     size_t readRows(
         size_t from_mark,
@@ -46,6 +51,8 @@ private:
     const PaddedPODArray<UInt64> * lazy_materializing_rows = nullptr;
 
     const IMergeTreeReader * main_reader;
+
+    BernoulliGranuleFilterPtr bernoulli_filter;
 
     /// Current row position used when continuing reads across multiple calls.
     size_t current_row = 0;
