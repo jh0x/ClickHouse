@@ -3,6 +3,7 @@
 
 #include <base/defines.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -115,8 +116,7 @@ BernoulliGranuleFilter::build(const MergeTreeIndexGranularity & index_granularit
         /// No more hits in this mark - adjust skip counter for next mark.
         remaining_skip -= rows_in_mark;
         cumulative_row += index_granularity.getMarkRows(mark);
-        if (cumulative_row > total_rows)
-            cumulative_row = total_rows;
+        cumulative_row = std::min(cumulative_row, total_rows);
     }
 
     return filter;
