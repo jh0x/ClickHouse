@@ -6660,7 +6660,7 @@ Approximate probability of failure for a keeper request during insert. Valid val
     DECLARE(UInt64, insert_keeper_fault_injection_seed, 0, R"(
 0 - random seed, otherwise the setting value
 )", 0) \
-    DECLARE(UInt64, bernoulli_sample_seed, 0, R"(
+    DECLARE(UInt64, bernoulli_sample_seed, 1, R"(
 Seed for Bernoulli sampling. 0 means random, nonzero means deterministic.
 )", 0) \
     DECLARE(Bool, force_aggregation_in_order, false, R"(
