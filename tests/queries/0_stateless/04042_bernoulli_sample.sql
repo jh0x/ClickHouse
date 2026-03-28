@@ -114,6 +114,27 @@ SELECT
 
 DROP TABLE t_bernoulli_large;
 
+SELECT 'bernoulli with skip index';
+DROP TABLE IF EXISTS t_bernoulli_skip;
+CREATE TABLE t_bernoulli_skip (x UInt64, y UInt64, INDEX idx_y y TYPE minmax GRANULARITY 1)
+ENGINE = MergeTree ORDER BY x
+SETTINGS index_granularity = 8192;
+INSERT INTO t_bernoulli_skip SELECT number, number FROM numbers(100000);
+-- WHERE y >= 50000 eliminates ~half the granules via the skip index.
+-- SAMPLE 0.1 with Bernoulli further reduces by ~10x.
+SELECT count() FROM t_bernoulli_skip SAMPLE 0.1 WHERE y >= 50000 SETTINGS bernoulli_sample_seed = 42;
+DROP TABLE t_bernoulli_skip;
+
+SELECT 'bernoulli with merge table';
+DROP TABLE IF EXISTS t_bernoulli_child;
+DROP TABLE IF EXISTS t_bernoulli_merge;
+CREATE TABLE t_bernoulli_child (x UInt64) ENGINE = MergeTree ORDER BY x;
+INSERT INTO t_bernoulli_child SELECT number FROM numbers(100000);
+CREATE TABLE t_bernoulli_merge (x UInt64) ENGINE = Merge(currentDatabase(), '^t_bernoulli_child$');
+SELECT count() FROM t_bernoulli_merge SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42;
+DROP TABLE t_bernoulli_merge;
+DROP TABLE t_bernoulli_child;
+
 SELECT 'prewhere with bernoulli';
 SELECT count() FROM t_bernoulli SAMPLE 0.1 PREWHERE x >= 50000 SETTINGS bernoulli_sample_seed = 42;
 

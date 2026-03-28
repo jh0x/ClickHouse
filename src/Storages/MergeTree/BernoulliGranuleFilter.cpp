@@ -37,9 +37,11 @@ void replayRange(
         return;
 
     /// Binary search for the checkpoint at or before starting_row.
-    auto it = std::lower_bound(
+    /// upper_bound finds the first checkpoint with mark_start_row > starting_row,
+    /// so prev(it) is the last checkpoint with mark_start_row <= starting_row.
+    auto it = std::upper_bound(
         std::begin(checkpoints), std::end(checkpoints), starting_row,
-        [](const auto & cp, size_t row) { return cp.mark_start_row < row; });
+        [](size_t row, const auto & cp) { return row < cp.mark_start_row; });
     size_t lo = (it == std::begin(checkpoints)) ? 0 : std::distance(std::begin(checkpoints), std::prev(it));
 
     /// Restore RNG state from checkpoint.
@@ -109,7 +111,7 @@ BernoulliGranuleFilter::build(const MergeTreeIndexGranularity & index_granularit
             remaining_skip = skip - 1;
         }
 
-        /// No more hits in this mark — adjust skip counter for next mark.
+        /// No more hits in this mark - adjust skip counter for next mark.
         remaining_skip -= rows_in_mark;
         cumulative_row += index_granularity.getMarkRows(mark);
         if (cumulative_row > total_rows)
@@ -130,16 +132,20 @@ void BernoulliGranuleFilter::appendToFilter(PaddedPODArray<UInt8> & filter_data,
 void BernoulliGranuleFilter::andWithFilter(
     PaddedPODArray<UInt8> & filter_data, size_t filter_offset, size_t starting_row, size_t num_rows) const
 {
-    /// First, collect hit positions into a bitset (represented by the existing filter values).
-    /// We need to zero all positions that are NOT hits, while preserving the AND with existing values.
-    /// Strategy: build a temporary hit bitmap, then AND it with the existing filter.
-
-    PaddedPODArray<UInt8> bernoulli_bits(num_rows, 0);
-
-    replayRange(checkpoints, log_one_minus_p, starting_row, num_rows, [&](size_t offset) { bernoulli_bits[offset] = 1; });
-
-    for (size_t i = 0; i < num_rows; ++i)
-        filter_data[filter_offset + i] &= bernoulli_bits[i];
+    /// Zero-allocation clear-then-set: zero non-hit positions in-place,
+    /// keep existing filter values at hit positions (AND with 1 = no-op).
+    size_t next_zero_from = 0;
+    replayRange(checkpoints, log_one_minus_p, starting_row, num_rows, [&](size_t offset)
+    {
+        /// Zero positions [next_zero_from, offset) - these are NOT Bernoulli hits.
+        for (size_t i = next_zero_from; i < offset; ++i)
+            filter_data[filter_offset + i] = 0;
+        /// Position 'offset' IS a hit - keep existing filter value.
+        next_zero_from = offset + 1;
+    });
+    /// Zero remaining positions after last hit.
+    for (size_t i = next_zero_from; i < num_rows; ++i)
+        filter_data[filter_offset + i] = 0;
 }
 
 }

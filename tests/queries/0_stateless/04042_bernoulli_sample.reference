@@ -33,5 +33,9 @@ large count in range
 2045
 large bit-exact determinism (checksum)
 1
+bernoulli with skip index
+4955
+bernoulli with merge table
+9913
 prewhere with bernoulli
 4955
