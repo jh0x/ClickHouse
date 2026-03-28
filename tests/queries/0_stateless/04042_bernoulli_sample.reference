@@ -14,6 +14,8 @@ absolute sample 50000
 49926
 sample_factor absolute
 2
+sample_factor absolute exceeding table size
+1
 empty table
 0
 parallel replicas sampling_key mode without sample by

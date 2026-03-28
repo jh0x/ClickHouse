@@ -4,6 +4,7 @@
 #include <base/defines.h>
 
 #include <cmath>
+#include <cstring>
 
 
 namespace DB
@@ -138,14 +139,14 @@ void BernoulliGranuleFilter::andWithFilter(
     replayRange(checkpoints, log_one_minus_p, starting_row, num_rows, [&](size_t offset)
     {
         /// Zero positions [next_zero_from, offset) - these are NOT Bernoulli hits.
-        for (size_t i = next_zero_from; i < offset; ++i)
-            filter_data[filter_offset + i] = 0;
+        if (offset > next_zero_from)
+            memset(&filter_data[filter_offset + next_zero_from], 0, offset - next_zero_from);
         /// Position 'offset' IS a hit - keep existing filter value.
         next_zero_from = offset + 1;
     });
     /// Zero remaining positions after last hit.
-    for (size_t i = next_zero_from; i < num_rows; ++i)
-        filter_data[filter_offset + i] = 0;
+    if (num_rows > next_zero_from)
+        memset(&filter_data[filter_offset + next_zero_from], 0, num_rows - next_zero_from);
 }
 
 }

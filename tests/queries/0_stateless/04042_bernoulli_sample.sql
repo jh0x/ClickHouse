@@ -41,6 +41,9 @@ SELECT count() FROM t_bernoulli SAMPLE 50000 SETTINGS bernoulli_sample_seed = 42
 SELECT 'sample_factor absolute';
 SELECT DISTINCT _sample_factor FROM t_bernoulli SAMPLE 50000 SETTINGS bernoulli_sample_seed = 42;
 
+SELECT 'sample_factor absolute exceeding table size';
+SELECT DISTINCT _sample_factor FROM t_bernoulli SAMPLE 200000;
+
 SELECT 'empty table';
 CREATE TABLE t_bernoulli_empty (x UInt64) ENGINE = MergeTree ORDER BY x;
 SELECT count() FROM t_bernoulli_empty SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42;
