@@ -87,11 +87,12 @@ public:
     enum class IndexType : uint8_t
     {
         None,
-        MinMax,
+        PartitionMinMax,
         Partition,
         PrimaryKey,
         Skip,
         PrimaryKeyExpand,
+        Statistics
     };
 
     struct DistributedIndexStat
