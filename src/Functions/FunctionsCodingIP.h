@@ -190,7 +190,37 @@ namespace detail
                 continue;
             }
 
-            convertToIPv6Impl<exception_mode>(src_value, src_value_end, vec_res[i], res_value, [&](auto v){ (*vec_null_map_to)[i] = v;});
+            bool parsed = false;
+
+            /// For both cases below: In case of failure, the function parseIPv6 fills vec_res with zeros.
+
+            /// If the source IP address is parsable as an IPv4 address, then transform it into a valid IPv6 address.
+            UInt32 ipv4 = 0;
+            if (tryParseIPv4(src_value, src_value_end, ipv4))
+            {
+                memset(res_value, 0, 10);
+                res_value[10] = 0xFF;
+                res_value[11] = 0xFF;
+                if constexpr (std::endian::native == std::endian::little)
+                    reverseMemcpy(&res_value[12], &ipv4, 4);
+                else
+                    memcpy(&res_value[12], &ipv4, 4);
+                parsed = true;
+            }
+            else
+            {
+                parsed = parseIPv6Whole(src_value, src_value_end, res_value);
+            }
+
+            if (!parsed)
+            {
+                if constexpr (exception_mode == IPStringToNumExceptionMode::Throw)
+                    throw Exception(ErrorCodes::CANNOT_PARSE_IPV6, "Invalid IPv6 value");
+                else if constexpr (exception_mode == IPStringToNumExceptionMode::Default)
+                    std::fill_n(&vec_res[out_offset], offset_inc, 0);
+                else if constexpr (exception_mode == IPStringToNumExceptionMode::Null)
+                    (*vec_null_map_to)[i] = true;
+            }
 
             src_offset = src_next_offset;
         }
