@@ -1,6 +1,10 @@
 error without experimental setting
 basic sample 0.1
 9913
+basic sample 0.5
+49926
+basic sample 0.9
+89772
 sample_factor
 10
 offset without sample by key

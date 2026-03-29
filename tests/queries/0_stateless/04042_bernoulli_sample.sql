@@ -19,6 +19,12 @@ SET allow_experimental_bernoulli_sample = 1;
 SELECT 'basic sample 0.1';
 SELECT count() FROM t_bernoulli SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42;
 
+SELECT 'basic sample 0.5';
+SELECT COUNT() FROM t_bernoulli SAMPLE 0.5 SETTINGS bernoulli_sample_seed = 42;
+
+SELECT 'basic sample 0.9';
+SELECT COUNT() FROM t_bernoulli SAMPLE 0.9 SETTINGS bernoulli_sample_seed = 42;
+
 SELECT 'sample_factor';
 SELECT DISTINCT _sample_factor FROM t_bernoulli SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42;
 

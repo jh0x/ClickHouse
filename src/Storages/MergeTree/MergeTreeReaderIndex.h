@@ -42,7 +42,14 @@ public:
     size_t getResultColumnCount() const override { return 1; }
 
     bool producesFilterOnly() const override { return true; }
-    bool mustApplyFilter() const override { return lazy_materializing_rows != nullptr; }
+    bool mustApplyFilter() const override
+    {
+        // If Bernoulli sampling filter is set, we MUST apply it immediate
+        // to ensure correct sampling semantics. Don't defer it.
+        if (bernoulli_filter)
+            return true;
+        return lazy_materializing_rows != nullptr;
+    }
 
 private:
     /// Used to filter data during merge tree reading.
