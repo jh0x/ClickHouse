@@ -115,7 +115,21 @@ SELECT
     =
     (SELECT sum(cityHash64(x)) FROM t_bernoulli_large SAMPLE 0.001 SETTINGS bernoulli_sample_seed = 42, max_threads = 7);
 
+SELECT 'very small probability';
+SELECT count() FROM t_bernoulli_large SAMPLE 0.0001 SETTINGS bernoulli_sample_seed = 42;
+
 DROP TABLE t_bernoulli_large;
+
+SELECT 'nonadaptive granularity';
+DROP TABLE IF EXISTS t_bernoulli_nonadaptive;
+CREATE TABLE t_bernoulli_nonadaptive (x UInt64) ENGINE = MergeTree ORDER BY x
+SETTINGS index_granularity = 8192, index_granularity_bytes = 0;
+INSERT INTO t_bernoulli_nonadaptive SELECT number FROM numbers(100000);
+SELECT
+    (SELECT count() FROM t_bernoulli SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42)
+    =
+    (SELECT count() FROM t_bernoulli_nonadaptive SAMPLE 0.1 SETTINGS bernoulli_sample_seed = 42);
+DROP TABLE t_bernoulli_nonadaptive;
 
 SELECT 'bernoulli with skip index';
 DROP TABLE IF EXISTS t_bernoulli_skip;

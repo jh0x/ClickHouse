@@ -35,6 +35,10 @@ large count in range
 2045
 large bit-exact determinism (checksum)
 1
+very small probability
+171
+nonadaptive granularity
+1
 bernoulli with skip index
 4955
 bernoulli with merge table
