@@ -46,6 +46,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"distributed_index_analysis_only_on_coordinator", false, false, "New setting."},
             {"enable_materialized_cte", false, false, "New setting"},
             {"finalize_projection_parts_synchronously", false, false, "New setting to finalize projection parts synchronously during INSERT to reduce peak memory usage."},
+            {"optimize_if_transform_const_strings_to_lowcardinality", false, false, "New setting to allow optimizing results of const branches from if/multiif/transform into LowCardinality"},
         });
         addSettingsChanges(settings_changes_history, "26.3",
         {
@@ -90,7 +91,6 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"deduplicate_insert", "backward_compatible_choice", "enable", "Enable deduplication for all sync and async inserts by default."},
             {"enable_join_runtime_filters", false, true, "Enabled this optimization"},
             {"parallel_replicas_filter_pushdown", false, false, "New setting"},
-            {"optimize_if_transform_const_strings_to_lowcardinality", false, false, "New setting to allow optimizing results of const branches from if/multiif/transform into LowCardinality"},
 
             {"optimize_dry_run_check_part", true, true, "New setting"},
             {"parallel_non_joined_rows_processing", true, true, "New setting to enable parallel processing of non-joined rows in RIGHT/FULL parallel_hash joins."},
