@@ -1,0 +1,16 @@
+LineString (no area) = 0
+0
+LineString::Geometry (no area) = 0
+0
+Ring (closed polygon) = -16
+-16
+LineString from table column = 0
+0
+MultiLineString (no area) = 0
+0
+Polygon (5x5 square) = 25
+25
+MultiLineString from table column = 0
+0
+Polygon from table column = 25
+25
