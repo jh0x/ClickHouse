@@ -58,7 +58,6 @@ public:
 private:
     //jhtodo: Const mantissa optimisation
     //jhtodo: SIMD?
-    //jhtodo: nans
     //jhtodo: bfloat
     template <typename Float, typename UInt, size_t MantissaBits>
     static ColumnPtr executeForType(const ColumnsWithTypeAndName & arguments, size_t input_rows_count)
@@ -77,9 +76,16 @@ private:
             if (n_signed < 0)
                 throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND, "Number of bits to trim in {} must be non-negative", name);
 
+            Float v = values[i];
+            if (std::isnan(v))
+            {
+                result_data[i] = v;
+                continue;
+            }
+
             UInt64 n = std::min<UInt64>(static_cast<UInt64>(n_signed), MantissaBits);
             UInt mask = ~((static_cast<UInt>(1) << n) - 1);
-            result_data[i] = bit_cast<Float>(bit_cast<UInt>(values[i]) & mask);
+            result_data[i] = bit_cast<Float>(bit_cast<UInt>(v) & mask);
         }
 
         return result;
@@ -102,7 +108,7 @@ The exponent and sign are preserved; `n` is clamped to the mantissa width
     FunctionDocumentation::ReturnedValue returned_value
         = {"Returns `value` with the lowest `n` mantissa bits zeroed, of the same type as `value`.", {"Float32", "Float64"}};
     FunctionDocumentation::Examples examples = {{"Trim 20 mantissa bits", "SELECT floatBitTrim(1.234::Float64, 20)", "1.2339999999385327"}};
-    FunctionDocumentation::IntroducedIn introduced_in = {26, 3};//jhtodo
+    FunctionDocumentation::IntroducedIn introduced_in = {26, 3}; //jhtodo
     FunctionDocumentation::Category category = FunctionDocumentation::Category::Bit;
     FunctionDocumentation documentation = {description, syntax, arguments, {}, returned_value, examples, introduced_in, category};
 
