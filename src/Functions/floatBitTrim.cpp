@@ -18,6 +18,23 @@ extern const int ARGUMENT_OUT_OF_BOUND;
 namespace
 {
 
+template <typename Float>
+inline bool is_nan(Float v)
+{
+    if constexpr (std::is_same_v<Float, BFloat16>)
+        return v.isNaN();
+    else
+        return std::isnan(v);
+}
+
+template <typename Float, typename MaskType>
+inline Float process_one(Float v, MaskType mask)
+{
+    if (is_nan(v))
+        return v;
+    return bit_cast<Float>(bit_cast<MaskType>(v) & mask);
+}
+
 class FunctionFloatBitTrim : public IFunction
 {
 public:
@@ -79,14 +96,6 @@ private:
             return static_cast<MaskType>(~((static_cast<MaskType>(1) << n) - 1));
         };
 
-        auto is_nan = [](Float v)
-        {
-            if constexpr (std::is_same_v<Float, BFloat16>)
-                return v.isNaN();
-            else
-                return std::isnan(v);
-        };
-
         if (isColumnConst(*bits_col_ptr))
         {
             Int64 n_raw = bits_col_ptr->getInt(0);
@@ -94,11 +103,7 @@ private:
 
             for (size_t i = 0; i < input_rows_count; ++i)
             {
-                Float v = values[i];
-                if (is_nan(v))
-                    result_data[i] = v;
-                else
-                    result_data[i] = bit_cast<Float>(bit_cast<MaskType>(v) & mask);
+                result_data[i] = process_one(values[i], mask);
             }
 
             return result;
@@ -109,14 +114,7 @@ private:
             Int64 n_raw = bits_col_ptr->getInt(i);
             const auto mask = get_mask(n_raw);
 
-            Float v = values[i];
-            if (is_nan(v))
-            {
-                result_data[i] = v;
-                continue;
-            }
-
-            result_data[i] = bit_cast<Float>(bit_cast<MaskType>(v) & mask);
+            result_data[i] = process_one(values[i], mask);
         }
 
         return result;
