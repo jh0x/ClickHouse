@@ -23,12 +23,37 @@ extern const int ARGUMENT_OUT_OF_BOUND;
 namespace
 {
 
-template <typename Float, typename UInt>
+template <typename Float>
+struct FloatTraits;
+template <>
+struct FloatTraits<Float64>
+{
+    using UInt = UInt64;
+    static constexpr UInt abs_mask = 0x7FFFFFFFFFFFFFFFULL;
+    static constexpr UInt inf_bits = 0x7FF0000000000000ULL;
+};
+template <>
+struct FloatTraits<Float32>
+{
+    using UInt = UInt32;
+    static constexpr UInt abs_mask = 0x7FFFFFFFu;
+    static constexpr UInt inf_bits = 0x7F800000u;
+};
+template <>
+struct FloatTraits<BFloat16>
+{
+    using UInt = UInt16;
+    static constexpr UInt abs_mask = 0x7FFF;
+    static constexpr UInt inf_bits = 0x7F80;
+};
+
+template <typename Float, typename UInt = typename FloatTraits<Float>::UInt>
 inline Float processOne(Float v, UInt mask)
 {
+    using Traits = FloatTraits<Float>;
     const UInt bits = bit_cast<UInt>(v);
-    const UInt nan_mask = (v != v) ? UInt(-1) : UInt(0);
-    return bit_cast<Float>(bits & (mask | nan_mask));
+    const UInt is_nan = ((bits & Traits::abs_mask) > Traits::inf_bits) ? UInt(~UInt{0}) : UInt{0};
+    return bit_cast<Float>(bits & (mask | is_nan));
 }
 
 template <typename Float, typename UInt>
@@ -80,10 +105,11 @@ static void processRangeF32_v3(const Float32 * __restrict src, Float32 * __restr
 X86_64_V3_FUNCTION_SPECIFIC_ATTRIBUTE
 static void processRangeBF16_v3(const BFloat16 * __restrict src, BFloat16 * __restrict dst, UInt16 mask, size_t n)
 {
+    using Traits = FloatTraits<BFloat16>;
     constexpr size_t W = 16;
     const __m256i mask_v = _mm256_set1_epi16(static_cast<int16_t>(mask));
-    const __m256i abs_m = _mm256_set1_epi16(0x7FFF);
-    const __m256i inf_v = _mm256_set1_epi16(0x7F80);
+    const __m256i abs_m = _mm256_set1_epi16(static_cast<int16_t>(Traits::abs_mask));
+    const __m256i inf_v = _mm256_set1_epi16(static_cast<int16_t>(Traits::inf_bits));
     size_t i = 0;
     for (; i + W <= n; i += W)
     {
@@ -137,10 +163,11 @@ static void processRangeF32_v4(const Float32 * __restrict src, Float32 * __restr
 X86_64_V4_FUNCTION_SPECIFIC_ATTRIBUTE
 static void processRangeBF16_v4(const BFloat16 * __restrict src, BFloat16 * __restrict dst, UInt16 mask, size_t n)
 {
+    using Traits = FloatTraits<BFloat16>;
     constexpr size_t W = 32;
     const __m512i mask_v = _mm512_set1_epi16(static_cast<int16_t>(mask));
-    const __m512i abs_m = _mm512_set1_epi16(0x7FFF);
-    const __m512i inf_v = _mm512_set1_epi16(0x7F80);
+    const __m512i abs_m = _mm512_set1_epi16(static_cast<int16_t>(Traits::abs_mask));
+    const __m512i inf_v = _mm512_set1_epi16(static_cast<int16_t>(Traits::inf_bits));
     size_t i = 0;
     for (; i + W <= n; i += W)
     {
