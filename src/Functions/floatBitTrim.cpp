@@ -6,6 +6,11 @@
 #include <Functions/IFunction.h>
 #include <base/BFloat16.h>
 #include <base/bit_cast.h>
+#include <Common/TargetSpecific.h>
+
+#if USE_MULTITARGET_CODE
+#    include <immintrin.h>
+#endif
 
 namespace DB
 {
@@ -18,12 +23,182 @@ extern const int ARGUMENT_OUT_OF_BOUND;
 namespace
 {
 
-template <typename Float, typename MaskType>
-inline Float processOne(Float v, MaskType mask)
+template <typename Float, typename UInt>
+inline Float processOne(Float v, UInt mask)
 {
-    if (isNaN(v))
-        return v;
-    return bit_cast<Float>(bit_cast<MaskType>(v) & mask);
+    const UInt bits = bit_cast<UInt>(v);
+    const UInt nan_mask = (v != v) ? UInt(-1) : UInt(0);
+    return bit_cast<Float>(bits & (mask | nan_mask));
+}
+
+template <typename Float, typename UInt>
+static void processRangeScalar(const Float * __restrict src, Float * __restrict dst, UInt mask, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+#if USE_MULTITARGET_CODE
+
+X86_64_V3_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeF64_v3(const Float64 * __restrict src, Float64 * __restrict dst, UInt64 mask, size_t n)
+{
+    constexpr size_t W = 4;
+    const __m256i mask_v = _mm256_set1_epi64x(static_cast<int64_t>(mask));
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m256d v = _mm256_loadu_pd(src + i);
+        __m256d nan = _mm256_cmp_pd(v, v, _CMP_UNORD_Q);
+        __m256i emsk = _mm256_or_si256(_mm256_castpd_si256(nan), mask_v);
+        __m256i ri = _mm256_and_si256(_mm256_castpd_si256(v), emsk);
+        _mm256_storeu_pd(dst + i, _mm256_castsi256_pd(ri));
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+X86_64_V3_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeF32_v3(const Float32 * __restrict src, Float32 * __restrict dst, UInt32 mask, size_t n)
+{
+    constexpr size_t W = 8;
+    const __m256i mask_v = _mm256_set1_epi32(static_cast<int32_t>(mask));
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m256 v = _mm256_loadu_ps(src + i);
+        __m256 nan = _mm256_cmp_ps(v, v, _CMP_UNORD_Q);
+        __m256i emsk = _mm256_or_si256(_mm256_castps_si256(nan), mask_v);
+        __m256i ri = _mm256_and_si256(_mm256_castps_si256(v), emsk);
+        _mm256_storeu_ps(dst + i, _mm256_castsi256_ps(ri));
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+/// BFloat16 NaN test on raw bit pattern: (x & 0x7FFF) > 0x7F80 (Inf).
+X86_64_V3_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeBF16_v3(const BFloat16 * __restrict src, BFloat16 * __restrict dst, UInt16 mask, size_t n)
+{
+    constexpr size_t W = 16;
+    const __m256i mask_v = _mm256_set1_epi16(static_cast<int16_t>(mask));
+    const __m256i abs_m = _mm256_set1_epi16(0x7FFF);
+    const __m256i inf_v = _mm256_set1_epi16(0x7F80);
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src + i));
+        __m256i abs_b = _mm256_and_si256(v, abs_m);
+        __m256i is_nan = _mm256_cmpgt_epi16(abs_b, inf_v);
+        __m256i emsk = _mm256_or_si256(mask_v, is_nan);
+        __m256i ri = _mm256_and_si256(v, emsk);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + i), ri);
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+X86_64_V4_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeF64_v4(const Float64 * __restrict src, Float64 * __restrict dst, UInt64 mask, size_t n)
+{
+    constexpr size_t W = 8;
+    const __m512i mask_v = _mm512_set1_epi64(static_cast<int64_t>(mask));
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m512d v = _mm512_loadu_pd(src + i);
+        __m512i vi = _mm512_castpd_si512(v);
+        __mmask8 nan = _mm512_cmp_pd_mask(v, v, _CMP_UNORD_Q);
+        __m512i ri = _mm512_mask_and_epi64(vi, static_cast<__mmask8>(~nan), vi, mask_v);
+        _mm512_storeu_pd(dst + i, _mm512_castsi512_pd(ri));
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+X86_64_V4_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeF32_v4(const Float32 * __restrict src, Float32 * __restrict dst, UInt32 mask, size_t n)
+{
+    constexpr size_t W = 16;
+    const __m512i mask_v = _mm512_set1_epi32(static_cast<int32_t>(mask));
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m512 v = _mm512_loadu_ps(src + i);
+        __m512i vi = _mm512_castps_si512(v);
+        __mmask16 nan = _mm512_cmp_ps_mask(v, v, _CMP_UNORD_Q);
+        __m512i ri = _mm512_mask_and_epi32(vi, static_cast<__mmask16>(~nan), vi, mask_v);
+        _mm512_storeu_ps(dst + i, _mm512_castsi512_ps(ri));
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+X86_64_V4_FUNCTION_SPECIFIC_ATTRIBUTE
+static void processRangeBF16_v4(const BFloat16 * __restrict src, BFloat16 * __restrict dst, UInt16 mask, size_t n)
+{
+    constexpr size_t W = 32;
+    const __m512i mask_v = _mm512_set1_epi16(static_cast<int16_t>(mask));
+    const __m512i abs_m = _mm512_set1_epi16(0x7FFF);
+    const __m512i inf_v = _mm512_set1_epi16(0x7F80);
+    size_t i = 0;
+    for (; i + W <= n; i += W)
+    {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(src + i));
+        __m512i abs_b = _mm512_and_si512(v, abs_m);
+        __mmask32 is_nan = _mm512_cmpgt_epi16_mask(abs_b, inf_v);
+        __m512i ri = _mm512_and_si512(v, mask_v);
+        ri = _mm512_mask_mov_epi16(ri, is_nan, v);
+        _mm512_storeu_si512(reinterpret_cast<__m512i *>(dst + i), ri);
+    }
+    for (; i < n; ++i)
+        dst[i] = processOne(src[i], mask);
+}
+
+#endif
+
+template <typename Float, typename UInt>
+static void processRange(const Float * src, Float * dst, UInt mask, size_t n)
+{
+#if USE_MULTITARGET_CODE
+    if (isArchSupported(TargetArch::x86_64_v4))
+    {
+        if constexpr (std::is_same_v<Float, Float64>)
+        {
+            processRangeF64_v4(src, dst, mask, n);
+            return;
+        }
+        else if constexpr (std::is_same_v<Float, Float32>)
+        {
+            processRangeF32_v4(src, dst, mask, n);
+            return;
+        }
+        else if constexpr (std::is_same_v<Float, BFloat16>)
+        {
+            processRangeBF16_v4(src, dst, mask, n);
+            return;
+        }
+    }
+    if (isArchSupported(TargetArch::x86_64_v3))
+    {
+        if constexpr (std::is_same_v<Float, Float64>)
+        {
+            processRangeF64_v3(src, dst, mask, n);
+            return;
+        }
+        else if constexpr (std::is_same_v<Float, Float32>)
+        {
+            processRangeF32_v3(src, dst, mask, n);
+            return;
+        }
+        else if constexpr (std::is_same_v<Float, BFloat16>)
+        {
+            processRangeBF16_v3(src, dst, mask, n);
+            return;
+        }
+    }
+#endif
+    processRangeScalar(src, dst, mask, n);
 }
 
 class FunctionFloatBitTrim : public IFunction
@@ -90,12 +265,7 @@ private:
         {
             Int64 n_raw = bits_col_ptr->getInt(0);
             const auto mask = get_mask(n_raw);
-
-            for (size_t i = 0; i < input_rows_count; ++i)
-            {
-                result_data[i] = processOne(values[i], mask);
-            }
-
+            processRange(values.data(), result_data.data(), mask, input_rows_count);
             return result;
         }
 
