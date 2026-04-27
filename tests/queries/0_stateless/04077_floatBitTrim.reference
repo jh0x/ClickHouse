@@ -79,3 +79,9 @@ Subnormals behavior.
 1
 1
 1
+SIMD parity over many rows (Float64): finite, NaN, Inf, subnormal.
+0
+SIMD parity over many rows (Float32): finite, NaN, Inf, subnormal.
+0
+SIMD parity over many rows (BFloat16): finite, NaN, Inf, subnormal.
+0

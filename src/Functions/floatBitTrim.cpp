@@ -252,6 +252,7 @@ private:
         }
         /// Clamp at MantissaBits
         const UInt64 n = std::min<UInt64>(static_cast<UInt64>(n_raw), MantissaBits);
+        /// n is clamped to MantissaBits (52|23|7)), so shift is defined
         return static_cast<MaskType>(~((static_cast<MaskType>(1) << n) - 1));
     }
 

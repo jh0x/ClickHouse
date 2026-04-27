@@ -110,3 +110,63 @@ SELECT 'Subnormals behavior.';
 SELECT floatBitTrim(reinterpretAsFloat64(toUInt64(1)), 1) = 0.0;
 SELECT floatBitTrim(reinterpretAsFloat64(toUInt64(3)), 1) = reinterpretAsFloat64(toUInt64(2));
 SELECT floatBitTrim(reinterpretAsFloat32(toUInt32(1)), 1) = 0.0::Float32;
+
+SELECT 'SIMD parity over many rows (Float64): finite, NaN, Inf, subnormal.';
+SELECT countIf(
+    reinterpretAsUInt64(floatBitTrim(v, 20)) != reinterpretAsUInt64(floatBitTrim(v, materialize(20))))
+FROM (
+    SELECT arrayJoin([
+        nan::Float64,
+        -nan::Float64,
+        inf::Float64,
+        -inf::Float64,
+        reinterpretAsFloat64(toUInt64(0x7FF8000000000001)),
+        reinterpretAsFloat64(toUInt64(1)),
+        reinterpretAsFloat64(toUInt64(0x000FFFFFFFFFFFFF)),
+        0.0::Float64,
+        -0.0::Float64,
+        1.234::Float64,
+        -3.14159::Float64
+    ]) AS v
+    FROM numbers(100)
+);
+
+SELECT 'SIMD parity over many rows (Float32): finite, NaN, Inf, subnormal.';
+SELECT countIf(
+    reinterpretAsUInt32(floatBitTrim(v, 10)) != reinterpretAsUInt32(floatBitTrim(v, materialize(10))))
+FROM (
+    SELECT arrayJoin([
+        nan::Float32,
+        -nan::Float32,
+        inf::Float32,
+        -inf::Float32,
+        reinterpretAsFloat32(toUInt32(0x7FC00001)),
+        reinterpretAsFloat32(toUInt32(1)),
+        reinterpretAsFloat32(toUInt32(0x007FFFFF)),
+        0.0::Float32,
+        -0.0::Float32,
+        1.234::Float32,
+        -3.14159::Float32
+    ]) AS v
+    FROM numbers(100)
+);
+
+SELECT 'SIMD parity over many rows (BFloat16): finite, NaN, Inf, subnormal.';
+SELECT countIf(
+    reinterpretAsUInt16(floatBitTrim(v, 3)) != reinterpretAsUInt16(floatBitTrim(v, materialize(3))))
+FROM (
+    SELECT arrayJoin([
+        nan::BFloat16,
+        -nan::BFloat16,
+        inf::BFloat16,
+        -inf::BFloat16,
+        CAST(reinterpretAsFloat32(toUInt32(0x7F810000)) AS BFloat16),
+        CAST(reinterpretAsFloat32(toUInt32(0x00010000)) AS BFloat16),
+        CAST(reinterpretAsFloat32(toUInt32(0x007F0000)) AS BFloat16),
+        0.0::BFloat16,
+        -0.0::BFloat16,
+        1.5::BFloat16,
+        -3.25::BFloat16
+    ]) AS v
+    FROM numbers(100)
+);
