@@ -49,6 +49,7 @@ NaN passes through unchanged.
 NaN must not collapse to Inf when trimmed.
 1
 1
+7F81
 0111111110000001
 Sign bit of NaN is preserved.
 1
@@ -56,6 +57,8 @@ Sign bit of NaN is preserved.
 Full payload is preserved.
 1
 1
+1
+7FC1
 7FC1
 Inf stays Inf.
 1

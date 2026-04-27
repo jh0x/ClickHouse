@@ -39,6 +39,7 @@ SELECT floatBitTrim('a', 1); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
 SELECT floatBitTrim(1.0::Float64, 'a'); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
 SELECT floatBitTrim(1.0::Float64, -1); -- { serverError ARGUMENT_OUT_OF_BOUND }
 SELECT floatBitTrim(1.0::Float64, materialize(-1::Int64)); -- { serverError ARGUMENT_OUT_OF_BOUND }
+SELECT floatBitTrim(1.0::Float64, n) FROM (SELECT arrayJoin([0, -1]) AS n) FORMAT Null; -- { serverError ARGUMENT_OUT_OF_BOUND }
 
 SELECT 'NaN passes through unchanged.';
 SELECT isNaN(floatBitTrim(nan::Float64, 0));
@@ -48,6 +49,8 @@ SELECT bin(reinterpretAsUInt16(floatBitTrim(nan::BFloat16, 0)));
 SELECT 'NaN must not collapse to Inf when trimmed.';
 SELECT isNaN(floatBitTrim(reinterpretAsFloat64(reinterpretAsUInt64(nan::Float64) + 1), 52));
 SELECT isNaN(floatBitTrim(reinterpretAsFloat32(reinterpretAsUInt32(nan::Float32) + 1), 23));
+-- Document that the Float32 -> BFloat16 cast actually produced the NaN bit
+SELECT hex(reinterpretAsUInt16(CAST(reinterpretAsFloat32(toUInt32(0x7F810000)) AS BFloat16)));
 SELECT bin(reinterpretAsUInt16(floatBitTrim(
     CAST(reinterpretAsFloat32(toUInt32(0x7F810000)) AS BFloat16), 7
 )));
@@ -59,6 +62,8 @@ SELECT reinterpretAsUInt32(floatBitTrim(-nan::Float32, 23)) = reinterpretAsUInt3
 SELECT 'Full payload is preserved.';
 SELECT reinterpretAsUInt64(floatBitTrim(reinterpretAsFloat64(toUInt64(0x7FF8000000000001)), 52)) = 0x7FF8000000000001;
 SELECT reinterpretAsUInt32(floatBitTrim(reinterpretAsFloat32(toUInt32(0x7FC00001)), 23)) = 0x7FC00001;
+SELECT reinterpretAsUInt32(floatBitTrim(reinterpretAsFloat32(toUInt32(0x7F800001)), 23)) = 0x7F800001;
+SELECT hex(reinterpretAsUInt16(CAST(reinterpretAsFloat32(toUInt32(0x7FC10000)) AS BFloat16)));
 SELECT hex(reinterpretAsUInt16(floatBitTrim(
     CAST(reinterpretAsFloat32(toUInt32(0x7FC10000)) AS BFloat16), 7
 )));
