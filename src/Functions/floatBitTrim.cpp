@@ -108,8 +108,8 @@ static void processRangeF64_v4(const Float64 * __restrict src, Float64 * __restr
     {
         __m512d v = _mm512_loadu_pd(src + i);
         __m512i vi = _mm512_castpd_si512(v);
-        __mmask8 nan = _mm512_cmp_pd_mask(v, v, _CMP_UNORD_Q);
-        __m512i ri = _mm512_mask_and_epi64(vi, static_cast<__mmask8>(~nan), vi, mask_v);
+        __mmask8 not_nan = _mm512_cmp_pd_mask(v, v, _CMP_ORD_Q);
+        __m512i ri = _mm512_mask_and_epi64(vi, not_nan, vi, mask_v);
         _mm512_storeu_pd(dst + i, _mm512_castsi512_pd(ri));
     }
     for (; i < n; ++i)
@@ -126,8 +126,8 @@ static void processRangeF32_v4(const Float32 * __restrict src, Float32 * __restr
     {
         __m512 v = _mm512_loadu_ps(src + i);
         __m512i vi = _mm512_castps_si512(v);
-        __mmask16 nan = _mm512_cmp_ps_mask(v, v, _CMP_UNORD_Q);
-        __m512i ri = _mm512_mask_and_epi32(vi, static_cast<__mmask16>(~nan), vi, mask_v);
+        __mmask16 not_nan = _mm512_cmp_ps_mask(v, v, _CMP_ORD_Q);
+        __m512i ri = _mm512_mask_and_epi32(vi, not_nan, vi, mask_v);
         _mm512_storeu_ps(dst + i, _mm512_castsi512_ps(ri));
     }
     for (; i < n; ++i)
@@ -220,10 +220,10 @@ public:
                 "First argument of {} must be BFloat16, Float32 or Float64, got {}",
                 getName(),
                 arguments[0]->getName());
-        if (!isInteger(arguments[1]))
+        if (!isNativeInteger(arguments[1]))
             throw Exception(
                 ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
-                "Second argument of {} must be an integer, got {}",
+                "Second argument of {} must be a native integer, got {}",
                 getName(),
                 arguments[1]->getName());
         return arguments[0];
@@ -242,6 +242,19 @@ public:
     }
 
 private:
+    template <typename MaskType, size_t MantissaBits, typename BitsToTrimType>
+    static MaskType getMask(BitsToTrimType n_raw)
+    {
+        if constexpr (std::is_signed_v<BitsToTrimType>)
+        {
+            if (n_raw < 0) [[unlikely]]
+                throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND, "Number of bits to trim in {} must be non-negative", name);
+        }
+        /// Clamp at MantissaBits
+        const UInt64 n = std::min<UInt64>(static_cast<UInt64>(n_raw), MantissaBits);
+        return static_cast<MaskType>(~((static_cast<MaskType>(1) << n) - 1));
+    }
+
     template <typename Float, typename MaskType, size_t MantissaBits>
     static ColumnPtr executeForType(const ColumnsWithTypeAndName & arguments, size_t input_rows_count)
     {
@@ -253,32 +266,46 @@ private:
         auto result = ColumnVector<Float>::create(input_rows_count);
         auto & result_data = result->getData();
 
-        auto get_mask = [&](auto n_raw) -> MaskType
-        {
-            if (n_raw < 0)
-                throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND, "Number of bits to trim in {} must be non-negative", name);
-            auto n = std::min<UInt64>(static_cast<UInt64>(n_raw), MantissaBits);
-            return static_cast<MaskType>(~((static_cast<MaskType>(1) << n) - 1));
-        };
-
         if (isColumnConst(*bits_col_ptr))
         {
-            Int64 n_raw = bits_col_ptr->getInt(0);
-            const auto mask = get_mask(n_raw);
+            const auto mask = getMask<MaskType, MantissaBits>(bits_col_ptr->getInt(0));
             processRange(values.data(), result_data.data(), mask, input_rows_count);
             return result;
         }
 
-        //jhtodo: Do we want variable n? If yes get rid of slower getInt
-        for (size_t i = 0; i < input_rows_count; ++i)
-        {
-            Int64 n_raw = bits_col_ptr->getInt(i);
-            const auto mask = get_mask(n_raw);
-
-            result_data[i] = processOne(values[i], mask);
-        }
+        WhichDataType bits_which(arguments[1].type);
+        if (bits_which.isUInt8())
+            runVariable<Float, MaskType, MantissaBits, UInt8>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isUInt16())
+            runVariable<Float, MaskType, MantissaBits, UInt16>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isUInt32())
+            runVariable<Float, MaskType, MantissaBits, UInt32>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isUInt64())
+            runVariable<Float, MaskType, MantissaBits, UInt64>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isInt8())
+            runVariable<Float, MaskType, MantissaBits, Int8>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isInt16())
+            runVariable<Float, MaskType, MantissaBits, Int16>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isInt32())
+            runVariable<Float, MaskType, MantissaBits, Int32>(values, *bits_col_ptr, result_data, input_rows_count);
+        else if (bits_which.isInt64())
+            runVariable<Float, MaskType, MantissaBits, Int64>(values, *bits_col_ptr, result_data, input_rows_count);
+        else
+            throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Unexpected integer type for second argument of {}", name);
 
         return result;
+    }
+
+    template <typename Float, typename MaskType, size_t MantissaBits, typename BitsType>
+    static void runVariable(
+        const PaddedPODArray<Float> & values, const IColumn & bits_col, PaddedPODArray<Float> & result_data, size_t input_rows_count)
+    {
+        const auto & bits_data = assert_cast<const ColumnVector<BitsType> &>(bits_col).getData();
+        for (size_t i = 0; i < input_rows_count; ++i)
+        {
+            const auto mask = getMask<MaskType, MantissaBits>(bits_data[i]);
+            result_data[i] = processOne(values[i], mask);
+        }
     }
 };
 
