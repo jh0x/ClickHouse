@@ -2010,6 +2010,7 @@ flatbuffers
 flattenTuple
 flink
 flipCoordinates
+floatBitTrim
 fluentd
 fmtlib
 formatDateTime
