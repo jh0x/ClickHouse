@@ -1,7 +1,8 @@
 /// Multi-buffer SIMD MD5 function.
 ///
 /// On x86-64 with AVX2 or AVX-512, processes 16 or 32 independent MD5 digests
-/// in parallel using SIMD lanes. Falls back to the scalar OpenSSL implementation
+/// in parallel using SIMD lanes. On AArch64 with ASIMD, processes 8 independent
+/// MD5 digests in parallel. Falls back to the scalar OpenSSL implementation
 /// on other architectures or when SIMD is not available.
 
 #include <Columns/ColumnFixedString.h>
@@ -29,6 +30,10 @@
 #include <immintrin.h>
 #endif
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -44,6 +49,18 @@ extern const int ILLEGAL_TYPE_OF_ARGUMENT;
 extern const int OPENSSL_ERROR;
 extern const int SUPPORT_IS_DISABLED;
 }
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#define USE_MD5_AARCH64_ASIMD 1
+#else
+#define USE_MD5_AARCH64_ASIMD 0
+#endif
+
+#if USE_MULTITARGET_CODE || USE_MD5_AARCH64_ASIMD
+#define USE_MD5_MULTI_BUFFER_SIMD 1
+#else
+#define USE_MD5_MULTI_BUFFER_SIMD 0
+#endif
 
 
 /// MD5 initial state (RFC 1321).
@@ -216,7 +233,7 @@ protected:
 ) // DECLARE_DEFAULT_CODE
 
 
-#if USE_MULTITARGET_CODE
+#if USE_MD5_MULTI_BUFFER_SIMD
 
 /// ============================================================
 /// Multi-buffer SIMD MD5, templated on Ops.
@@ -854,7 +871,94 @@ public:
 
 ) // DECLARE_X86_64_V4_SPECIFIC_CODE
 
-#endif // USE_MULTITARGET_CODE
+#if USE_MD5_AARCH64_ASIMD
+
+/// AArch64 ASIMD/NEON (4 lanes x 2 groups = 8 parallel digests).
+/// ASIMD is baseline for AArch64, so no runtime feature dispatch is needed.
+DECLARE_DEFAULT_CODE(
+
+struct ASIMDMD5Ops
+{
+    using Vec = uint32x4_t;
+    static constexpr size_t lanes = 4;
+
+    static inline Vec add(Vec a, Vec b)
+    {
+        return vaddq_u32(a, b);
+    }
+    static inline Vec set1(uint32_t v)
+    {
+        return vdupq_n_u32(v);
+    }
+    static inline Vec loadu(const void * p)
+    {
+        return vreinterpretq_u32_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(p)));
+    }
+    static inline void storeu(void * p, Vec v)
+    {
+        vst1q_u8(reinterpret_cast<uint8_t *>(p), vreinterpretq_u8_u32(v));
+    }
+
+    template <int N>
+    static inline Vec rotl(Vec x)
+    {
+        return vorrq_u32(vshlq_n_u32(x, N), vshrq_n_u32(x, 32 - N));
+    }
+
+    static inline Vec F(Vec b, Vec c, Vec d)
+    {
+        return veorq_u32(d, vandq_u32(b, veorq_u32(c, d)));
+    }
+    static inline Vec G(Vec b, Vec c, Vec d)
+    {
+        return veorq_u32(c, vandq_u32(d, veorq_u32(b, c)));
+    }
+    static inline Vec H(Vec b, Vec c, Vec d)
+    {
+        return veorq_u32(b, veorq_u32(c, d));
+    }
+    static inline Vec I(Vec b, Vec c, Vec d)
+    {
+        return veorq_u32(c, vorrq_u32(b, vmvnq_u32(d)));
+    }
+
+    static inline uint32_t loadWordLE(const uint8_t * p)
+    {
+        uint32_t value;
+        std::memcpy(&value, p, sizeof(value));
+        return value;
+    }
+
+    static inline void gatherAllMessageWords(const uint8_t * const block_ptrs[], Vec msg[16])
+    {
+        for (size_t word = 0; word < 16; ++word)
+        {
+            const size_t off = word * sizeof(uint32_t);
+            const uint32_t values[lanes] = {
+                loadWordLE(block_ptrs[0] + off),
+                loadWordLE(block_ptrs[1] + off),
+                loadWordLE(block_ptrs[2] + off),
+                loadWordLE(block_ptrs[3] + off),
+            };
+            msg[word] = loadu(values);
+        }
+    }
+};
+
+class FunctionMD5ImplASIMD : public FunctionMD5Base
+{
+public:
+    ColumnPtr executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr &, size_t input_rows_count) const override
+    {
+        return executeMD5Batch<ASIMDMD5Ops>(arguments, input_rows_count);
+    }
+};
+
+) // DECLARE_DEFAULT_CODE
+
+#endif
+
+#endif // USE_MD5_MULTI_BUFFER_SIMD
 
 
 /// Runtime dispatch via ImplementationSelector.
@@ -864,7 +968,11 @@ public:
     explicit FunctionMD5(ContextPtr context)
         : selector(context)
     {
+#if USE_MD5_AARCH64_ASIMD
+        selector.registerImplementation<TargetArch::Default, TargetSpecific::Default::FunctionMD5ImplASIMD>();
+#else
         selector.registerImplementation<TargetArch::Default, TargetSpecific::Default::FunctionMD5Impl>();
+#endif
 
 #if USE_MULTITARGET_CODE
         selector.registerImplementation<TargetArch::x86_64_v3, TargetSpecific::x86_64_v3::FunctionMD5Impl>();
