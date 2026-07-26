@@ -244,6 +244,9 @@ The time zone name for ORC row reader, the default ORC row reader's time zone is
     DECLARE(Bool, input_format_orc_dictionary_as_low_cardinality, true, R"(
 Treat ORC dictionary encoded columns as LowCardinality columns while reading ORC files.
 )", 0) \
+    DECLARE(String, input_format_hdf5_dataset, "/", R"(
+Dataset or group path within an HDF5 file. When pointing at a group, each child 1D dataset becomes a column. When pointing at a compound dataset, each field becomes a column.
+)", 0) \
     DECLARE(Bool, input_format_parquet_allow_missing_columns, true, R"(
 Allow missing columns while reading Parquet input formats
 )", 0) \

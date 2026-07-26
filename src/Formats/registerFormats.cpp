@@ -66,6 +66,7 @@ void registerInputFormatMsgPack(FormatFactory & factory);
 void registerOutputFormatMsgPack(FormatFactory & factory);
 void registerInputFormatORC(FormatFactory & factory);
 void registerOutputFormatORC(FormatFactory & factory);
+void registerInputFormatHDF5(FormatFactory & factory);
 void registerInputFormatParquet(FormatFactory & factory);
 void registerOutputFormatParquet(FormatFactory & factory);
 void registerInputFormatArrow(FormatFactory & factory);
@@ -122,6 +123,7 @@ void registerNonTrivialPrefixAndSuffixCheckerJSONAsObject(FormatFactory & factor
 void registerArrowSchemaReader(FormatFactory & factory);
 void registerParquetSchemaReader(FormatFactory & factory);
 void registerORCSchemaReader(FormatFactory & factory);
+void registerHDF5SchemaReader(FormatFactory & factory);
 void registerTSVSchemaReader(FormatFactory & factory);
 void registerCSVSchemaReader(FormatFactory & factory);
 void registerJSONCompactEachRowSchemaReader(FormatFactory & factory);
@@ -229,6 +231,7 @@ void registerFormats()
 
     registerInputFormatORC(factory);
     registerOutputFormatORC(factory);
+    registerInputFormatHDF5(factory);
     registerInputFormatParquet(factory);
     registerOutputFormatParquet(factory);
     registerInputFormatAvro(factory);
@@ -278,6 +281,7 @@ void registerFormats()
     registerArrowSchemaReader(factory);
     registerParquetSchemaReader(factory);
     registerORCSchemaReader(factory);
+    registerHDF5SchemaReader(factory);
     registerTSVSchemaReader(factory);
     registerCSVSchemaReader(factory);
     registerJSONSchemaReader(factory);

@@ -245,6 +245,10 @@ endif()
 
 set (USE_YTSAURUS 1)
 
+if (TARGET ch_contrib::hdf5)
+    set(USE_HDF5 1)
+endif()
+
 if (TARGET ch_contrib::sz3)
     set(USE_SZ3 1)
 endif()

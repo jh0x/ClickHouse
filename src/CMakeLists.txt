@@ -847,6 +847,10 @@ if (TARGET ch_contrib::libarchive)
     target_link_libraries (clickhouse_common_io PUBLIC ch_contrib::libarchive)
 endif()
 
+if (TARGET ch_contrib::hdf5)
+    target_link_libraries (dbms PRIVATE ch_contrib::hdf5)
+endif()
+
 if (TARGET ch_contrib::minizip)
     target_link_libraries (clickhouse_common_io PRIVATE ch_contrib::minizip)
 endif ()

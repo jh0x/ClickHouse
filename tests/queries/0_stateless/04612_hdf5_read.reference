@@ -1,0 +1,85 @@
+--- Trivial: root-level 1D datasets ---
+Schema:
+x	Int32					
+y	Float64					
+Data:
+1	10.5
+2	20.5
+3	30.5
+--- Flat group of 1D datasets ---
+Schema:
+x	Int32					
+y	Float64					
+Data:
+1	1.1
+2	2.2
+3	3.3
+4	4.4
+5	5.5
+--- Compound dataset ---
+Schema:
+id	Int32					
+value	Float64					
+Data:
+1	1.5
+2	2.5
+3	3.5
+--- Nested group ---
+10	1
+20	2
+30	3
+--- Various numeric types ---
+Schema:
+f32	Float32					
+f64	Float64					
+i8	Int8					
+u16	UInt16					
+Data:
+1	1e-10	-128	0
+2	0	0	1000
+3	10000000000	127	65535
+--- Fixed-length strings ---
+Schema:
+name	FixedString(10)					
+Data:
+alice\0\0\0\0\0
+bob\0\0\0\0\0\0\0
+carol\0\0\0\0\0
+--- Column subset of compound dataset ---
+1.5
+2.5
+3.5
+--- Column subset of flat group ---
+1.1
+2.2
+3.3
+4.4
+5.5
+--- Variable-length strings (UTF-8) ---
+Schema:
+label	String					
+value	Int32					
+Data:
+hello	10
+world	20
+	30
+--- Variable-length strings (ASCII) ---
+Schema:
+id	Int32					
+name	String					
+Data:
+1	alpha
+2	beta
+3	gamma
+--- Empty dataset ---
+Schema:
+x	Int32					
+y	Float64					
+Data:
+0
+--- Large dataset spanning multiple batches ---
+70000	1	70000	2450035000
+--- Schema mismatch: Int32 file read as Int8 ---
+BAD_ARGUMENTS
+--- Error: nonexistent dataset ---
+INCORRECT_DATA
