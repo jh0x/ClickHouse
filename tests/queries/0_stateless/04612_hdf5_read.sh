@@ -67,6 +67,12 @@ $CLICKHOUSE_LOCAL -q "SELECT count() FROM file('$DATA_DIR/empty.h5')"
 echo "--- Large dataset spanning multiple batches ---"
 $CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(id) FROM file('$DATA_DIR/large.h5')"
 
+echo "--- Compressed (deflate) dataset ---"
+echo "Schema:"
+$CLICKHOUSE_LOCAL -q "DESCRIBE file('$DATA_DIR/compressed.h5') SETTINGS input_format_hdf5_dataset = '/deflate'"
+echo "Data:"
+$CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(value) FROM file('$DATA_DIR/compressed.h5') SETTINGS input_format_hdf5_dataset = '/deflate'"
+
 echo "--- Schema mismatch: Int32 file read as Int8 ---"
 $CLICKHOUSE_LOCAL -q "SELECT * FROM file('$DATA_DIR/schema_mismatch.h5', 'HDF5', 'col Int8')" 2>&1 | grep -o 'BAD_ARGUMENTS'
 

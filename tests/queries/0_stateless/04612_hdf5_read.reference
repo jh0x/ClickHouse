@@ -79,6 +79,12 @@ Data:
 0
 --- Large dataset spanning multiple batches ---
 70000	1	70000	2450035000
+--- Compressed (deflate) dataset ---
+Schema:
+id	Int32					
+value	Float64					
+Data:
+100	1	100	7575
 --- Schema mismatch: Int32 file read as Int8 ---
 BAD_ARGUMENTS
 --- Error: nonexistent dataset ---
