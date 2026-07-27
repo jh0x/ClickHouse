@@ -54,6 +54,11 @@
 #define H5_HAVE_NETDB_H 1
 #define H5_HAVE_NETINET_IN_H 1
 #define H5_HAVE_STDATOMIC_H 1
+#define H5_HAVE_QSORT_REENTRANT 1
+
+/* No complex number support needed. */
+/* #undef H5_HAVE_COMPLEX_NUMBERS */
+/* #undef H5_HAVE_C99_COMPLEX_NUMBERS */
 
 #ifdef __APPLE__
 #define H5_HAVE_DARWIN 1
@@ -71,7 +76,10 @@
 
 /* No thread safety - we manage our own mutex. */
 /* #undef H5_HAVE_THREADSAFE */
+/* #undef H5_HAVE_CONCURRENCY */
 /* #undef H5_HAVE_WIN_THREADS */
+/* #undef H5_HAVE_C11_THREADS */
+/* #undef H5_HAVE_THREADS */
 
 /* No parallel/MPI. */
 /* #undef H5_HAVE_PARALLEL */
@@ -104,8 +112,8 @@
 #define H5_USE_FILE_LOCKING 1
 #define H5_IGNORE_DISABLED_FILE_LOCKS 1
 
-/* Use latest 1.14 API. */
-#define H5_USE_114_API_DEFAULT 1
+/* Use latest 2.0 API. */
+#define H5_USE_200_API_DEFAULT 1
 
 /* No deprecated symbols needed. */
 /* #undef H5_NO_DEPRECATED_SYMBOLS */
@@ -196,11 +204,11 @@
 #define H5_PACKAGE "hdf5"
 #define H5_PACKAGE_BUGREPORT "help@hdfgroup.org"
 #define H5_PACKAGE_NAME "HDF5"
-#define H5_PACKAGE_STRING "HDF5 1.14.6"
+#define H5_PACKAGE_STRING "HDF5 2.1.1"
 #define H5_PACKAGE_TARNAME "hdf5"
 #define H5_PACKAGE_URL "http://www.hdfgroup.org"
-#define H5_PACKAGE_VERSION "1.14.6"
-#define H5_VERSION "1.14.6"
+#define H5_PACKAGE_VERSION "2.1.1"
+#define H5_VERSION "2.1.1"
 
 /* Max real precision for conversions. */
 #define H5_PAC_C_MAX_REAL_PRECISION 33
