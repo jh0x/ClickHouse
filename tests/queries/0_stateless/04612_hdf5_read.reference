@@ -85,6 +85,43 @@ id	Int32
 value	Float64					
 Data:
 100	1	100	7575
+--- Hyperslab: start only ---
+3	3.3
+4	4.4
+5	5.5
+--- Hyperslab: start + count + block ---
+2	2.2
+3	3.3
+--- Hyperslab: stride on large dataset ---
+100	1	199
+--- Hyperslab: negative start ---
+4	4.4
+5	5.5
+--- Hyperslab: cross-batch boundary ---
+68000	1	68000
+--- Hyperslab: compound dataset ---
+1	1.5
+2	2.5
+--- Hyperslab: empty brackets (identity) ---
+70000
+--- Hyperslab: all defaults (identity) ---
+70000
+--- Error: hyperslab out of range ---
+BAD_ARGUMENTS
+--- Error: malformed hyperslab ---
+BAD_ARGUMENTS
+--- Error: 2D dataset ---
+BAD_ARGUMENTS
+--- Error: nested compound type ---
+INCORRECT_DATA
+--- Error: unsupported type (enum) ---
+INCORRECT_DATA
+--- Error: empty group ---
+BAD_ARGUMENTS
+--- Error: multi-dimensional hyperslab ---
+BAD_ARGUMENTS
+--- Error: column not found in compound ---
+BAD_ARGUMENTS
 --- Schema mismatch: Int32 file read as Int8 ---
 BAD_ARGUMENTS
 --- Error: nonexistent dataset ---

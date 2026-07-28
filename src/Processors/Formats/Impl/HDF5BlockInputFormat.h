@@ -10,8 +10,20 @@
 
 #include <hdf5.h>
 
+#include <optional>
+
 namespace DB
 {
+
+/// Resolved hyperslab parameters for 1D selection.
+struct ResolvedHyperslab
+{
+    hsize_t start;
+    hsize_t stride;
+    hsize_t count;
+    hsize_t block;
+    hsize_t total_elements; /// = count * block
+};
 
 class HDF5Handle
 {
@@ -79,6 +91,9 @@ private:
     hsize_t rows_read = 0;
     hsize_t total_rows = 0;
     static constexpr hsize_t BATCH_SIZE = 65536;
+
+    /// User-specified hyperslab (nullopt = read entire dataset).
+    std::optional<ResolvedHyperslab> user_hyperslab;
 };
 
 class HDF5SchemaReader final : public ISchemaReader

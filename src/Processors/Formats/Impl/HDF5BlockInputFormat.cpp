@@ -14,7 +14,9 @@
 
 #include <base/scope_guard.h>
 
+#include <charconv>
 #include <mutex>
+#include <ranges>
 
 namespace DB
 {
@@ -198,6 +200,177 @@ String getFilePath(ReadBuffer & in)
 }
 
 
+/// Hyperslab parameter set [start]:[stride]:[count]:[block]
+struct HDF5HyperslabParams
+{
+    std::optional<Int64> start; /// can be negative
+    std::optional<hsize_t> stride;
+    std::optional<hsize_t> count;
+    std::optional<hsize_t> block;
+};
+
+struct HDF5ParsedDatasetPath
+{
+    String path;
+    std::vector<HDF5HyperslabParams> dimensions; /// Empty = no hyperslab.
+};
+
+/// Parse an HDFql like format
+/// Syntax: path [ [start]:[stride]:[count]:[block] [, ...per dim] ] (note we do 1D right now)
+HDF5ParsedDatasetPath parseDatasetPath(const String & setting)
+{
+    auto bracket_pos = setting.find('[');
+    if (bracket_pos == String::npos)
+        return {setting, {}};
+
+    String path = setting.substr(0, bracket_pos);
+
+    auto close_pos = setting.find(']', bracket_pos);
+    if (close_pos == String::npos)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Malformed hyperslab notation: unmatched '[' in '{}'", setting);
+
+    /// Reject content after closing bracket (whitespace is allowed).
+    for (size_t i = close_pos + 1; i < setting.size(); ++i)
+        if (!isspace(setting[i]))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected content after ']' in '{}'", setting);
+
+    std::string_view spec(setting.data() + bracket_pos + 1, close_pos - bracket_pos - 1);
+
+    /// Empty brackets = identity (no hyperslab).
+    if (spec.empty())
+        return {path, {}};
+
+    auto parseToken = [&](std::string_view tok, bool allow_negative) -> std::optional<Int64>
+    {
+        auto begin = tok.find_first_not_of(" \t");
+        if (begin == std::string_view::npos)
+            return std::nullopt;
+        auto end = tok.find_last_not_of(" \t") + 1;
+        auto trimmed = tok.substr(begin, end - begin);
+
+        Int64 val{};
+        auto [ptr, ec] = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), val);
+        if (ec != std::errc{} || ptr != trimmed.data() + trimmed.size())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Invalid hyperslab parameter '{}': expected integer in '{}'", trimmed, setting);
+        if (!allow_negative && val < 0)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Negative value not allowed for this hyperslab parameter in '{}'", setting);
+        return val;
+    };
+
+    /// Split on comma for per-dimension specs.
+    std::vector<HDF5HyperslabParams> dims;
+
+    for (auto dim_range : spec | std::views::split(','))
+    {
+        std::string_view dim_spec(dim_range.begin(), dim_range.end());
+
+        HDF5HyperslabParams params;
+        unsigned field = 0;
+        for (auto tok_range : dim_spec | std::views::split(':'))
+        {
+            if (field >= 4)
+                throw Exception(
+                    ErrorCodes::BAD_ARGUMENTS,
+                    "Too many hyperslab parameters (expected at most 4: start:stride:count:block) in '{}'",
+                    setting);
+            if (auto val = parseToken({tok_range.begin(), tok_range.end()}, field == 0))
+            {
+                switch (field)
+                {
+                    case 0: params.start = *val; break;
+                    case 1: params.stride = static_cast<hsize_t>(*val); break;
+                    case 2: params.count = static_cast<hsize_t>(*val); break;
+                    case 3: params.block = static_cast<hsize_t>(*val); break;
+                    default: UNREACHABLE();
+                }
+            }
+            ++field;
+        }
+        dims.push_back(params);
+    }
+
+    /// Check if all parameters are defaults (all nullopt) - treat as identity.
+    bool all_defaults = std::ranges::all_of(dims, [](const auto & d) { return !d.start && !d.stride && !d.count && !d.block; });
+
+    if (all_defaults)
+        return {path, {}};
+
+    return {path, std::move(dims)};
+}
+
+/// Resolve parsed hyperslab parameters against a known dimension size.
+ResolvedHyperslab resolveHyperslabParams(const HDF5HyperslabParams & params, hsize_t dim_size)
+{
+    ResolvedHyperslab result;
+
+    /// 1. start: default 0. Negative indexes from end.
+    if (params.start)
+    {
+        Int64 s = *params.start;
+        if (s < 0)
+            s = static_cast<Int64>(dim_size) + s;
+        if (s < 0 || static_cast<hsize_t>(s) >= dim_size)
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS, "Hyperslab start index {} is out of range for dimension of size {}", *params.start, dim_size);
+        result.start = static_cast<hsize_t>(s);
+    }
+    else
+    {
+        result.start = 0;
+    }
+
+    /// 2. count: default 1.
+    result.count = params.count.value_or(1);
+    if (result.count < 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Hyperslab count must be >= 1");
+
+    /// 3. block: default (dim_size - start) / count.
+    if (params.block)
+    {
+        result.block = *params.block;
+        if (result.block < 1)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Hyperslab block must be >= 1");
+    }
+    else
+    {
+        result.block = (dim_size - result.start) / result.count;
+        if (result.block < 1)
+            result.block = 1;
+    }
+
+    /// 4. stride: default block (contiguous blocks).
+    if (params.stride)
+    {
+        result.stride = *params.stride;
+        if (result.stride < 1)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Hyperslab stride must be >= 1");
+    }
+    else
+    {
+        result.stride = result.block;
+    }
+
+    /// 5. total_elements.
+    result.total_elements = result.count * result.block;
+
+    /// 6. Bounds check: start + (count - 1) * stride + block <= dim_size.
+    hsize_t end = result.start + (result.count - 1) * result.stride + result.block;
+    if (end > dim_size)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "Hyperslab selection exceeds dataset dimension: "
+            "start({}) + (count({})-1)*stride({}) + block({}) = {} > dim_size({})",
+            result.start,
+            result.count,
+            result.stride,
+            result.block,
+            end,
+            dim_size);
+
+    return result;
+}
+
+
 /// Callback context for H5Literate when building schema from a group.
 struct GroupSchemaContext
 {
@@ -254,11 +427,15 @@ void HDF5SchemaReader::initialize()
 
     String file_path = getFilePath(in);
 
+    auto parsed = parseDatasetPath(format_settings.hdf5.dataset);
+    const String & dataset_path = parsed.path;
+
+    if (parsed.dimensions.size() > 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Multi-dimensional hyperslab is not yet supported");
+
     std::lock_guard lock(hdf5_global_mutex);
 
     HDF5Handle file(H5Fopen(file_path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT), &H5Fclose);
-
-    const String & dataset_path = format_settings.hdf5.dataset;
 
     /// Determine whether the path points to a group or a dataset.
     H5O_info2_t obj_info;
@@ -279,7 +456,12 @@ void HDF5SchemaReader::initialize()
             throw Exception(ErrorCodes::BAD_ARGUMENTS, "HDF5 group '{}' contains no datasets", dataset_path);
 
         cached_schema = std::move(ctx.schema);
-        cached_num_rows = ctx.expected_rows.value_or(0);
+        hsize_t dim = ctx.expected_rows.value_or(0);
+
+        if (!parsed.dimensions.empty())
+            cached_num_rows = resolveHyperslabParams(parsed.dimensions[0], dim).total_elements;
+        else
+            cached_num_rows = dim;
     }
     else if (obj_info.type == H5O_TYPE_DATASET)
     {
@@ -307,7 +489,6 @@ void HDF5SchemaReader::initialize()
                 HDF5Handle member_handle = getMemberType(dtype, i);
                 cached_schema.emplace_back(std::move(member_name), hdf5TypeToClickHouse(member_handle));
             }
-            cached_num_rows = dim;
         }
         else
         {
@@ -322,8 +503,12 @@ void HDF5SchemaReader::initialize()
                 col_name = col_name.substr(pos + 1);
 
             cached_schema.emplace_back(std::move(col_name), hdf5TypeToClickHouse(dtype));
-            cached_num_rows = dim;
         }
+
+        if (!parsed.dimensions.empty())
+            cached_num_rows = resolveHyperslabParams(parsed.dimensions[0], dim).total_elements;
+        else
+            cached_num_rows = dim;
     }
     else
     {
@@ -419,10 +604,12 @@ void readTypedBlock(hid_t dataset, hid_t mem_type, hid_t mem_space, hid_t file_s
 
 /// Read a 1D dataset (or slice) into a ClickHouse column.
 /// Called under hdf5_global_mutex.
-void readDatasetIntoColumn(hid_t dataset, hid_t file_dataspace, hid_t file_datatype, hsize_t start, hsize_t count, IColumn & column)
+void readDatasetIntoColumn(
+    hid_t dataset, hid_t file_dataspace, hid_t file_datatype, hsize_t start, hsize_t stride, hsize_t count, hsize_t block, IColumn & column)
 {
-    checkHDF5(H5Sselect_hyperslab(file_dataspace, H5S_SELECT_SET, &start, nullptr, &count, nullptr), "Cannot select HDF5 hyperslab");
-    HDF5Handle mem_space(H5Screate_simple(1, &count, nullptr), &H5Sclose);
+    hsize_t total_elements = count * block;
+    checkHDF5(H5Sselect_hyperslab(file_dataspace, H5S_SELECT_SET, &start, &stride, &count, &block), "Cannot select HDF5 hyperslab");
+    HDF5Handle mem_space(H5Screate_simple(1, &total_elements, nullptr), &H5Sclose);
 
     HDF5Handle native_type(H5Tget_native_type(file_datatype, H5T_DIR_DEFAULT), &H5Tclose);
 
@@ -435,21 +622,31 @@ void readDatasetIntoColumn(hid_t dataset, hid_t file_dataspace, hid_t file_datat
         mem_type = vlen_type;
     }
 
-    readTypedBlock(dataset, mem_type, mem_space, file_dataspace, count, native_type, column);
+    readTypedBlock(dataset, mem_type, mem_space, file_dataspace, total_elements, native_type, column);
 }
 
 /// Read one field of a compound dataset into a column.
 /// Uses the HDF5 trick of creating a memory compound type with a single member
 /// at offset 0 - H5Dread then extracts just that field.
 void readCompoundFieldIntoColumn(
-    hid_t dataset, hid_t file_dataspace, hid_t file_compound_type, unsigned member_index, hsize_t start, hsize_t count, IColumn & column)
+    hid_t dataset,
+    hid_t file_dataspace,
+    hid_t file_compound_type,
+    unsigned member_index,
+    hsize_t start,
+    hsize_t stride,
+    hsize_t count,
+    hsize_t block,
+    IColumn & column)
 {
+    hsize_t total_elements = count * block;
+
     String member_name = getMemberName(file_compound_type, member_index);
     HDF5Handle member_type = getMemberType(file_compound_type, member_index);
     HDF5Handle native_member(H5Tget_native_type(member_type, H5T_DIR_DEFAULT), &H5Tclose);
 
-    checkHDF5(H5Sselect_hyperslab(file_dataspace, H5S_SELECT_SET, &start, nullptr, &count, nullptr), "Cannot select HDF5 hyperslab");
-    HDF5Handle mem_space(H5Screate_simple(1, &count, nullptr), &H5Sclose);
+    checkHDF5(H5Sselect_hyperslab(file_dataspace, H5S_SELECT_SET, &start, &stride, &count, &block), "Cannot select HDF5 hyperslab");
+    HDF5Handle mem_space(H5Screate_simple(1, &total_elements, nullptr), &H5Sclose);
 
     /// For vlen strings, use a charset-preserving type; for others, use the native type.
     hid_t inner_type = native_member;
@@ -464,7 +661,7 @@ void readCompoundFieldIntoColumn(
     HDF5Handle mem_compound(H5Tcreate(H5T_COMPOUND, H5Tget_size(inner_type)), &H5Tclose);
     checkHDF5(H5Tinsert(mem_compound, member_name.c_str(), 0, inner_type), "Cannot create HDF5 compound extraction type");
 
-    readTypedBlock(dataset, mem_compound, mem_space, file_dataspace, count, native_member, column);
+    readTypedBlock(dataset, mem_compound, mem_space, file_dataspace, total_elements, native_member, column);
 }
 
 } // anonymous namespace
@@ -500,6 +697,7 @@ void HDF5BlockInputFormat::resetParser()
     total_rows = 0;
     reader_prepared = false;
     is_compound = false;
+    user_hyperslab.reset();
 }
 
 void HDF5BlockInputFormat::prepareReader()
@@ -510,11 +708,15 @@ void HDF5BlockInputFormat::prepareReader()
 
     String file_path = getFilePath(*in);
 
+    auto parsed = parseDatasetPath(format_settings.hdf5.dataset);
+    const String & dataset_path = parsed.path;
+
+    if (parsed.dimensions.size() > 1)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Multi-dimensional hyperslab is not yet supported");
+
     std::lock_guard lock(hdf5_global_mutex);
 
     file_handle = HDF5Handle(H5Fopen(file_path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT), &H5Fclose);
-
-    const String & dataset_path = format_settings.hdf5.dataset;
 
     H5O_info2_t obj_info;
     checkHDF5(H5Oget_info_by_name3(file_handle, dataset_path.c_str(), &obj_info, H5O_INFO_BASIC, H5P_DEFAULT), "Cannot resolve HDF5 path");
@@ -526,6 +728,7 @@ void HDF5BlockInputFormat::prepareReader()
         /// Layout 1: flat group of 1D datasets.
         HDF5Handle group(H5Gopen2(file_handle, dataset_path.c_str(), H5P_DEFAULT), &H5Gclose);
 
+        hsize_t group_dim = 0;
         for (size_t col = 0; col < header.columns(); ++col)
         {
             const String & col_name = header.getByPosition(col).name;
@@ -545,12 +748,22 @@ void HDF5BlockInputFormat::prepareReader()
             H5Sget_simple_extent_dims(info.dataspace, &dim, nullptr);
             info.num_rows = dim;
 
-            if (total_rows == 0)
-                total_rows = dim;
-            else if (total_rows != dim)
-                throw Exception(ErrorCodes::BAD_ARGUMENTS, "HDF5 datasets in group have different lengths: {} vs {}", total_rows, dim);
+            if (group_dim == 0)
+                group_dim = dim;
+            else if (group_dim != dim)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "HDF5 datasets in group have different lengths: {} vs {}", group_dim, dim);
 
             datasets.push_back(std::move(info));
+        }
+
+        if (!parsed.dimensions.empty())
+        {
+            user_hyperslab = resolveHyperslabParams(parsed.dimensions[0], group_dim);
+            total_rows = user_hyperslab->total_elements;
+        }
+        else
+        {
+            total_rows = group_dim;
         }
     }
     else if (obj_info.type == H5O_TYPE_DATASET)
@@ -563,7 +776,6 @@ void HDF5BlockInputFormat::prepareReader()
         int ndims = H5Sget_simple_extent_ndims(space);
         if (ndims >= 1)
             H5Sget_simple_extent_dims(space, &dim, nullptr);
-        total_rows = dim;
 
         H5T_class_t cls = H5Tget_class(dtype);
         if (cls == H5T_COMPOUND)
@@ -603,6 +815,16 @@ void HDF5BlockInputFormat::prepareReader()
             info.num_rows = dim;
             datasets.push_back(std::move(info));
         }
+
+        if (!parsed.dimensions.empty())
+        {
+            user_hyperslab = resolveHyperslabParams(parsed.dimensions[0], dim);
+            total_rows = user_hyperslab->total_elements;
+        }
+        else
+        {
+            total_rows = dim;
+        }
     }
     else
     {
@@ -617,7 +839,35 @@ Chunk HDF5BlockInputFormat::read()
     if (is_stopped || rows_read >= total_rows)
         return {};
 
-    hsize_t batch_rows = std::min(BATCH_SIZE, total_rows - rows_read);
+    /// Compute file-space hyperslab parameters for this batch.
+    hsize_t file_start, file_stride, file_count, file_block, batch_elements;
+
+    if (user_hyperslab)
+    {
+        const auto & hs = *user_hyperslab;
+        hsize_t blocks_read = rows_read / hs.block;
+        hsize_t remaining_blocks = hs.count - blocks_read;
+
+        hsize_t batch_blocks;
+        if (hs.block >= BATCH_SIZE)
+            batch_blocks = 1;
+        else
+            batch_blocks = std::min(BATCH_SIZE / hs.block, remaining_blocks);
+
+        file_start = hs.start + blocks_read * hs.stride;
+        file_stride = hs.stride;
+        file_count = batch_blocks;
+        file_block = hs.block;
+        batch_elements = batch_blocks * hs.block;
+    }
+    else
+    {
+        batch_elements = std::min(BATCH_SIZE, total_rows - rows_read);
+        file_start = rows_read;
+        file_stride = 1;
+        file_count = batch_elements;
+        file_block = 1;
+    }
 
     const auto & header = getPort().getHeader();
     size_t num_cols = header.columns();
@@ -634,8 +884,10 @@ Chunk HDF5BlockInputFormat::read()
                 compound_dataspace,
                 compound_datatype,
                 compound_member_indices[col],
-                rows_read,
-                batch_rows,
+                file_start,
+                file_stride,
+                file_count,
+                file_block,
                 *columns[col]);
         }
     }
@@ -644,12 +896,12 @@ Chunk HDF5BlockInputFormat::read()
         for (size_t col = 0; col < num_cols; ++col)
         {
             auto & ds = datasets[col];
-            readDatasetIntoColumn(ds.dataset, ds.dataspace, ds.datatype, rows_read, batch_rows, *columns[col]);
+            readDatasetIntoColumn(ds.dataset, ds.dataspace, ds.datatype, file_start, file_stride, file_count, file_block, *columns[col]);
         }
     }
 
-    rows_read += batch_rows;
-    return Chunk(std::move(columns), batch_rows);
+    rows_read += batch_elements;
+    return Chunk(std::move(columns), batch_elements);
 }
 
 
