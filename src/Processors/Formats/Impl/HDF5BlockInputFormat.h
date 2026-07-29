@@ -15,6 +15,8 @@
 namespace DB
 {
 
+class SeekableReadBuffer;
+
 /// Resolved hyperslab parameters for 1D selection.
 struct ResolvedHyperslab
 {
@@ -44,6 +46,28 @@ public:
     operator hid_t() const { return id; }
 };
 
+/// Physical location of a single HDF5 chunk on disk.
+struct HDF5ChunkInfo
+{
+    hsize_t logical_offset; /// Position of the chunk's first element.
+    haddr_t file_addr; /// Byte offset in the file.
+    hsize_t size; /// On-disk byte count (possibly compressed).
+    unsigned filter_mask; /// Bitmask: bit set = filter skipped for this chunk.
+};
+
+/// Metadata extracted from an HDF5 dataset
+/// When present, bulk data can be read directly rather than via hdf5 functions
+struct HDF5DirectReadMeta
+{
+    H5D_layout_t layout;
+    haddr_t contiguous_offset = HADDR_UNDEF;
+    hsize_t chunk_dim = 0;
+    H5T_order_t byte_order = H5T_ORDER_ERROR;
+    size_t element_size = 0;
+    std::vector<H5Z_filter_t> filters;
+    std::vector<HDF5ChunkInfo> chunks; /// Sorted by logical_offset.
+};
+
 /// Metadata about a single 1D dataset within a group ("Layout 1").
 struct HDF5DatasetInfo
 {
@@ -53,6 +77,7 @@ struct HDF5DatasetInfo
     HDF5Handle datatype;
     hsize_t num_rows = 0;
     DataTypePtr ch_type;
+    std::optional<HDF5DirectReadMeta> direct_meta; /// Set when direct I/O is possible.
 };
 
 class HDF5BlockInputFormat final : public IInputFormat
@@ -70,6 +95,7 @@ protected:
 
 private:
     void prepareReader();
+    void tryEnableDirectRead();
     void closeHandles();
 
     const FormatSettings format_settings;
@@ -92,8 +118,11 @@ private:
     hsize_t total_rows = 0;
     static constexpr hsize_t BATCH_SIZE = 65536;
 
-    /// User-specified hyperslab (nullopt = read entire dataset).
+    /// User-specified hyperslab
     std::optional<ResolvedHyperslab> user_hyperslab;
+
+    bool use_direct_read = false;
+    SeekableReadBuffer * seekable_buf = nullptr;
 };
 
 class HDF5SchemaReader final : public ISchemaReader

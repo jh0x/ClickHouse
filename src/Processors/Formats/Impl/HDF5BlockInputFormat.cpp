@@ -9,14 +9,22 @@
 #include <DataTypes/DataTypesNumber.h>
 #include <Formats/FormatFactory.h>
 #include <IO/ReadHelpers.h>
+#include <IO/SeekableReadBuffer.h>
 #include <IO/WithFileName.h>
 #include <Processors/Formats/Impl/HDF5BlockInputFormat.h>
 
 #include <base/scope_guard.h>
 
+#include <algorithm>
+#include <bit>
 #include <charconv>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <ranges>
+#include <span>
+
+#include <zlib.h>
 
 namespace DB
 {
@@ -371,6 +379,341 @@ ResolvedHyperslab resolveHyperslabParams(const HDF5HyperslabParams & params, hsi
 }
 
 
+/// Helpers for reading without libhdf5 (--> no mutex)
+
+static constexpr H5T_order_t host_byte_order =
+    std::endian::native == std::endian::little ? H5T_ORDER_LE : H5T_ORDER_BE;
+
+template <typename T>
+void byteSwapTyped(std::span<char> data)
+{
+    size_t count = data.size() / sizeof(T);
+    for (size_t i = 0; i < count; ++i)
+    {
+        T val;
+        memcpy(&val, data.data() + i * sizeof(T), sizeof(T));
+        val = std::byteswap(val);
+        memcpy(data.data() + i * sizeof(T), &val, sizeof(T));
+    }
+}
+
+void byteSwapElements(std::span<char> data, size_t element_size)
+{
+    switch (element_size)
+    {
+        case 0:
+        case 1:
+            return;
+        case 2:
+            byteSwapTyped<UInt16>(data);
+            return;
+        case 4:
+            byteSwapTyped<UInt32>(data);
+            return;
+        case 8:
+            byteSwapTyped<UInt64>(data);
+            return;
+        default:
+            size_t count = data.size() / element_size;
+            for (size_t i = 0; i < count; ++i)
+            {
+                char * elem = data.data() + i * element_size;
+                std::reverse(elem, elem + element_size);
+            }
+    }
+}
+
+void unshuffleBytes(const char * src, char * dst, size_t total_bytes, size_t element_size)
+{
+    size_t n_elements = total_bytes / element_size;
+    for (size_t i = 0; i < n_elements; ++i)
+        for (size_t b = 0; b < element_size; ++b)
+            dst[i * element_size + b] = src[b * n_elements + i];
+}
+
+/// Apply HDF5 filter pipeline in reverse order to decompress a chunk.
+/// Filters applied during write (first to last) are reversed during read.
+void reverseFilterPipeline(
+    std::vector<char> buf_a,
+    const std::vector<H5Z_filter_t> & filters,
+    unsigned filter_mask,
+    size_t uncompressed_size,
+    size_t element_size,
+    char * out)
+{
+    /// Ping-pong buffers for multi-filter pipelines.
+    std::vector<char> buf_b;
+
+    for (int i = static_cast<int>(filters.size()) - 1; i >= 0; --i)
+    {
+        if (filter_mask & (1u << static_cast<unsigned>(i)))
+            continue;
+
+        switch (filters[i])
+        {
+            case H5Z_FILTER_DEFLATE: {
+                buf_b.resize(uncompressed_size);
+                z_stream zs{};
+                zs.next_in = reinterpret_cast<Bytef *>(buf_a.data());
+                if (buf_a.size() > std::numeric_limits<uInt>::max())
+                    throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 chunk too large for zlib: {} bytes exceeds uInt range", buf_a.size());
+                zs.avail_in = static_cast<uInt>(buf_a.size());
+                zs.next_out = reinterpret_cast<Bytef *>(buf_b.data());
+                if (buf_b.size() > std::numeric_limits<uInt>::max())
+                    throw Exception(
+                        ErrorCodes::INCORRECT_DATA,
+                        "HDF5 decompressed chunk too large for zlib: {} bytes exceeds uInt range",
+                        buf_b.size());
+                zs.avail_out = static_cast<uInt>(buf_b.size());
+
+                if (inflateInit(&zs) != Z_OK)
+                    throw Exception(ErrorCodes::INCORRECT_DATA, "Failed to initialize zlib inflate for HDF5 chunk");
+
+                int ret = inflate(&zs, Z_FINISH);
+                /// Clean up zlib state regardless of inflate result.
+                inflateEnd(&zs); // NOLINT(bugprone-unused-return-value)
+
+                if (ret != Z_STREAM_END)
+                    throw Exception(ErrorCodes::INCORRECT_DATA, "Failed to decompress HDF5 chunk (zlib error: {})", ret);
+
+                buf_b.resize(zs.total_out);
+                std::swap(buf_a, buf_b);
+                break;
+            }
+
+            case H5Z_FILTER_SHUFFLE: {
+                buf_b.resize(buf_a.size());
+                unshuffleBytes(buf_a.data(), buf_b.data(), buf_a.size(), element_size);
+                std::swap(buf_a, buf_b);
+                break;
+            }
+
+            default:
+                throw Exception(
+                    ErrorCodes::INCORRECT_DATA, "Unsupported HDF5 filter in direct read path: {}", static_cast<int>(filters[i]));
+        }
+    }
+
+    if (buf_a.size() < uncompressed_size)
+        throw Exception(
+            ErrorCodes::INCORRECT_DATA,
+            "HDF5 chunk decompression size mismatch: expected at least {} bytes, got {}",
+            uncompressed_size,
+            buf_a.size());
+
+    memcpy(out, buf_a.data(), uncompressed_size);
+}
+
+bool isSupportedDirectReadFilter(H5Z_filter_t filter)
+{
+    return filter == H5Z_FILTER_DEFLATE || filter == H5Z_FILTER_SHUFFLE;
+}
+
+/// Extract metadata for direct I/O
+/// Returns nullopt if the dataset cannot be read directly
+/// Must be called under hdf5_global_mutex.
+std::optional<HDF5DirectReadMeta> extractDirectReadMeta(hid_t dataset, hid_t datatype)
+{
+    H5T_class_t cls = H5Tget_class(datatype);
+
+    if (cls == H5T_STRING && H5Tis_variable_str(datatype))
+        return std::nullopt;
+
+    if (cls == H5T_COMPOUND)
+        return std::nullopt;
+
+    HDF5DirectReadMeta meta;
+
+    meta.byte_order = H5Tget_order(datatype);
+    meta.element_size = H5Tget_size(datatype);
+
+    HDF5Handle dcpl(H5Dget_create_plist(dataset), &H5Pclose);
+    meta.layout = H5Pget_layout(dcpl);
+
+    if (meta.layout == H5D_CONTIGUOUS)
+    {
+        meta.contiguous_offset = H5Dget_offset(dataset);
+        if (meta.contiguous_offset == HADDR_UNDEF)
+            return std::nullopt;
+    }
+    else if (meta.layout == H5D_CHUNKED)
+    {
+        hsize_t chunk_dim = 0;
+        int chunk_ndims = H5Pget_chunk(dcpl, 1, &chunk_dim);
+        if (chunk_ndims != 1)
+            return std::nullopt;
+        meta.chunk_dim = chunk_dim;
+
+        int nfilters = H5Pget_nfilters(dcpl);
+        for (int i = 0; i < nfilters; ++i)
+        {
+            unsigned flags = 0;
+            size_t cd_nelmts = 0;
+            H5Z_filter_t filt = H5Pget_filter2(dcpl, static_cast<unsigned>(i), &flags, &cd_nelmts, nullptr, 0, nullptr, nullptr);
+            if (!isSupportedDirectReadFilter(filt))
+                return std::nullopt;
+            meta.filters.push_back(filt);
+        }
+
+        herr_t status = H5Dchunk_iter(
+            dataset,
+            H5P_DEFAULT,
+            [](const hsize_t * offset, unsigned fmask, haddr_t addr, hsize_t size, void * op_data) -> herr_t
+            {
+                auto & chunks = *static_cast<std::vector<HDF5ChunkInfo> *>(op_data);
+                chunks.push_back({offset[0], addr, size, fmask});
+                return H5_ITER_CONT;
+            },
+            &meta.chunks);
+
+        if (status < 0)
+            return std::nullopt;
+
+        std::sort(
+            meta.chunks.begin(),
+            meta.chunks.end(),
+            [](const HDF5ChunkInfo & a, const HDF5ChunkInfo & b) { return a.logical_offset < b.logical_offset; });
+    }
+    else
+    {
+        return std::nullopt;
+    }
+
+    return meta;
+}
+
+/// Read a contiguous range from a contiguous dataset.
+void readContiguousDirect(
+    SeekableReadBuffer & buf, const HDF5DirectReadMeta & meta, hsize_t start, hsize_t stride, hsize_t count, hsize_t block, char * out)
+{
+    hsize_t total_elements = count * block;
+
+    if (stride == block)
+    {
+        /// Contiguous blocks - single read.
+        size_t file_offset = meta.contiguous_offset + start * meta.element_size;
+        size_t bytes = total_elements * meta.element_size;
+        size_t nread = buf.readBigAt(out, bytes, file_offset, nullptr);
+        if (nread != bytes)
+            throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 direct read: expected {} bytes, got {}", bytes, nread);
+    }
+    else
+    {
+        /// Strided blocks - read each block separately.
+        char * dest = out;
+        for (hsize_t b = 0; b < count; ++b)
+        {
+            hsize_t elem_start = start + b * stride;
+            size_t file_offset = meta.contiguous_offset + elem_start * meta.element_size;
+            size_t bytes = block * meta.element_size;
+            size_t nread = buf.readBigAt(dest, bytes, file_offset, nullptr);
+            if (nread != bytes)
+                throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 direct read: expected {} bytes, got {}", bytes, nread);
+            dest += bytes;
+        }
+    }
+}
+
+/// Read elements from a chunked dataset, decompressing if necessary.
+void readChunkedDirect(
+    SeekableReadBuffer & buf,
+    const HDF5DirectReadMeta & meta,
+    hsize_t start,
+    hsize_t stride,
+    hsize_t count,
+    hsize_t block,
+    hsize_t dataset_dim,
+    char * out)
+{
+    size_t out_offset = 0;
+    bool has_filters = !meta.filters.empty();
+
+    for (hsize_t b = 0; b < count; ++b)
+    {
+        hsize_t block_start = start + b * stride;
+        hsize_t block_end = block_start + block;
+
+        auto it = std::lower_bound(
+            meta.chunks.begin(),
+            meta.chunks.end(),
+            block_start,
+            [&](const HDF5ChunkInfo & c, hsize_t val) { return c.logical_offset + meta.chunk_dim <= val; });
+
+        for (; it != meta.chunks.end() && it->logical_offset < block_end; ++it)
+        {
+            hsize_t chunk_start = it->logical_offset;
+            hsize_t chunk_end = std::min(chunk_start + meta.chunk_dim, dataset_dim);
+            hsize_t overlap_start = std::max(chunk_start, block_start);
+            hsize_t overlap_end = std::min(chunk_end, block_end);
+            hsize_t overlap_count = overlap_end - overlap_start;
+
+            if (has_filters)
+            {
+                std::vector<char> raw(it->size);
+                size_t nread = buf.readBigAt(raw.data(), it->size, it->file_addr, nullptr);
+                if (nread != it->size)
+                    throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 direct read: expected {} chunk bytes, got {}", it->size, nread);
+
+                size_t uncompressed_size = meta.chunk_dim * meta.element_size;
+                std::vector<char> decompressed(uncompressed_size);
+                reverseFilterPipeline(
+                    std::move(raw), meta.filters, it->filter_mask, uncompressed_size, meta.element_size, decompressed.data());
+
+                size_t src_off = (overlap_start - chunk_start) * meta.element_size;
+                size_t copy_bytes = overlap_count * meta.element_size;
+                memcpy(out + out_offset, decompressed.data() + src_off, copy_bytes);
+            }
+            else
+            {
+                size_t src_off = (overlap_start - chunk_start) * meta.element_size;
+                size_t file_offset = it->file_addr + src_off;
+                size_t copy_bytes = overlap_count * meta.element_size;
+                size_t nread = buf.readBigAt(out + out_offset, copy_bytes, file_offset, nullptr);
+                if (nread != copy_bytes)
+                    throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 direct read: expected {} bytes, got {}", copy_bytes, nread);
+            }
+
+            out_offset += overlap_count * meta.element_size;
+        }
+    }
+}
+
+/// Top-level direct read for a single dataset column.
+void readDatasetDirect(
+    SeekableReadBuffer & buf,
+    const HDF5DirectReadMeta & meta,
+    hsize_t dataset_dim,
+    hsize_t start,
+    hsize_t stride,
+    hsize_t count,
+    hsize_t block,
+    IColumn & column)
+{
+    hsize_t total_elements = count * block;
+    auto dest = column.insertRawUninitialized(total_elements);
+
+    if (dest.size() != total_elements * meta.element_size)
+        throw Exception(
+            ErrorCodes::INCORRECT_DATA,
+            "HDF5 direct read: column buffer size mismatch: expected {} bytes, got {}",
+            total_elements * meta.element_size,
+            dest.size());
+
+    if (meta.layout == H5D_CONTIGUOUS)
+        readContiguousDirect(buf, meta, start, stride, count, block, dest.data());
+    else if (meta.layout == H5D_CHUNKED)
+        readChunkedDirect(buf, meta, start, stride, count, block, dataset_dim, dest.data());
+    else
+        throw Exception(ErrorCodes::INCORRECT_DATA, "HDF5 direct read: unsupported layout {}", static_cast<int>(meta.layout));
+
+    /// Byte-swap only for numeric types with a definite byte order that differs from host.
+    bool needs_swap = (meta.byte_order == H5T_ORDER_LE || meta.byte_order == H5T_ORDER_BE) && meta.byte_order != host_byte_order
+        && meta.element_size > 1;
+    if (needs_swap)
+        byteSwapElements(dest, meta.element_size);
+}
+
+
 /// Callback context for H5Literate when building schema from a group.
 struct GroupSchemaContext
 {
@@ -697,7 +1040,21 @@ void HDF5BlockInputFormat::resetParser()
     total_rows = 0;
     reader_prepared = false;
     is_compound = false;
+    use_direct_read = false;
+    seekable_buf = nullptr;
     user_hyperslab.reset();
+}
+
+void HDF5BlockInputFormat::tryEnableDirectRead()
+{
+    if (!std::ranges::all_of(datasets, [](const auto & ds) { return ds.direct_meta.has_value(); }))
+        return;
+    auto * seekable = dynamic_cast<SeekableReadBuffer *>(in);
+    if (seekable && seekable->supportsReadAt())
+    {
+        seekable_buf = seekable;
+        use_direct_read = true;
+    }
 }
 
 void HDF5BlockInputFormat::prepareReader()
@@ -765,6 +1122,10 @@ void HDF5BlockInputFormat::prepareReader()
         {
             total_rows = group_dim;
         }
+
+        for (auto & ds : datasets)
+            ds.direct_meta = extractDirectReadMeta(ds.dataset, ds.datatype);
+        tryEnableDirectRead();
     }
     else if (obj_info.type == H5O_TYPE_DATASET)
     {
@@ -798,6 +1159,7 @@ void HDF5BlockInputFormat::prepareReader()
                 validateTypeCompatibility(member_handle, header.getByPosition(col).type, col_name);
                 compound_member_indices.push_back(static_cast<unsigned>(m));
             }
+            /// Compound datasets always use H5Dread (direct read not supported).
         }
         else
         {
@@ -813,7 +1175,10 @@ void HDF5BlockInputFormat::prepareReader()
             info.dataspace = std::move(space);
             info.datatype = std::move(dtype);
             info.num_rows = dim;
+
+            info.direct_meta = extractDirectReadMeta(info.dataset, info.datatype);
             datasets.push_back(std::move(info));
+            tryEnableDirectRead();
         }
 
         if (!parsed.dimensions.empty())
@@ -873,30 +1238,44 @@ Chunk HDF5BlockInputFormat::read()
     size_t num_cols = header.columns();
     MutableColumns columns = header.cloneEmptyColumns();
 
-    std::lock_guard lock(hdf5_global_mutex);
-
-    if (is_compound)
+    if (use_direct_read)
     {
+        /// Direct I/O path: read raw bytes without libhdf5, no lock needed.
         for (size_t col = 0; col < num_cols; ++col)
         {
-            readCompoundFieldIntoColumn(
-                compound_dataset,
-                compound_dataspace,
-                compound_datatype,
-                compound_member_indices[col],
-                file_start,
-                file_stride,
-                file_count,
-                file_block,
-                *columns[col]);
+            auto & ds = datasets[col];
+            readDatasetDirect(*seekable_buf, *ds.direct_meta, ds.num_rows, file_start, file_stride, file_count, file_block, *columns[col]);
         }
     }
     else
     {
-        for (size_t col = 0; col < num_cols; ++col)
+        /// Fallback path: use H5Dread under the global mutex.
+        std::lock_guard lock(hdf5_global_mutex);
+
+        if (is_compound)
         {
-            auto & ds = datasets[col];
-            readDatasetIntoColumn(ds.dataset, ds.dataspace, ds.datatype, file_start, file_stride, file_count, file_block, *columns[col]);
+            for (size_t col = 0; col < num_cols; ++col)
+            {
+                readCompoundFieldIntoColumn(
+                    compound_dataset,
+                    compound_dataspace,
+                    compound_datatype,
+                    compound_member_indices[col],
+                    file_start,
+                    file_stride,
+                    file_count,
+                    file_block,
+                    *columns[col]);
+            }
+        }
+        else
+        {
+            for (size_t col = 0; col < num_cols; ++col)
+            {
+                auto & ds = datasets[col];
+                readDatasetIntoColumn(
+                    ds.dataset, ds.dataspace, ds.datatype, file_start, file_stride, file_count, file_block, *columns[col]);
+            }
         }
     }
 

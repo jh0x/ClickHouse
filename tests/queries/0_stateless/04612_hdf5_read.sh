@@ -126,3 +126,30 @@ $CLICKHOUSE_LOCAL -q "SELECT * FROM file('$DATA_DIR/schema_mismatch.h5', 'HDF5',
 
 echo "--- Error: nonexistent dataset ---"
 $CLICKHOUSE_LOCAL -q "SELECT * FROM file('$DATA_DIR/test.h5') SETTINGS input_format_hdf5_dataset = '/nonexistent'" 2>&1 | grep -o 'INCORRECT_DATA'
+
+echo "--- Shuffle + deflate filter ---"
+echo "Schema:"
+$CLICKHOUSE_LOCAL -q "DESCRIBE file('$DATA_DIR/shuffle.h5') SETTINGS input_format_hdf5_dataset = '/shuffled'"
+echo "Data:"
+$CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(id), min(value), max(value) FROM file('$DATA_DIR/shuffle.h5') SETTINGS input_format_hdf5_dataset = '/shuffled'"
+
+echo "--- Big-endian contiguous (byte-swap) ---"
+echo "Schema:"
+$CLICKHOUSE_LOCAL -q "DESCRIBE file('$DATA_DIR/bigendian.h5') SETTINGS input_format_hdf5_dataset = '/data'"
+echo "Data:"
+$CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(id), min(value), max(value) FROM file('$DATA_DIR/bigendian.h5') SETTINGS input_format_hdf5_dataset = '/data'"
+
+echo "--- Big-endian contiguous strided hyperslab ---"
+$CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(id), min(value), max(value) FROM file('$DATA_DIR/bigendian.h5') SETTINGS input_format_hdf5_dataset = '/data[0:2:25:1]'"
+
+echo "--- Big-endian + shuffle + deflate ---"
+$CLICKHOUSE_LOCAL -q "SELECT count(), min(id), max(id), sum(id), min(value), max(value) FROM file('$DATA_DIR/bigendian_compressed.h5') SETTINGS input_format_hdf5_dataset = '/data'"
+
+echo "--- Cross-check: direct read (flat) vs H5Dread (compound) ---"
+FLAT_HASH=$($CLICKHOUSE_LOCAL -q "SELECT sipHash64(groupArray(id), groupArray(value)) FROM (SELECT * FROM file('$DATA_DIR/crosscheck.h5', 'HDF5', 'id Int32, value Float64') ORDER BY id SETTINGS input_format_hdf5_dataset = '/flat')" || echo FAIL)
+COMPOUND_HASH=$($CLICKHOUSE_LOCAL -q "SELECT sipHash64(groupArray(id), groupArray(value)) FROM (SELECT * FROM file('$DATA_DIR/crosscheck.h5', 'HDF5', 'id Int32, value Float64') ORDER BY id SETTINGS input_format_hdf5_dataset = '/compound')" || echo FAIL)
+[ "$FLAT_HASH" = "$COMPOUND_HASH" ] && echo "MATCH" || echo "MISMATCH: $FLAT_HASH vs $COMPOUND_HASH"
+
+echo "--- Cross-check: direct read (flat compressed) vs H5Dread (compound) ---"
+COMPRESSED_HASH=$($CLICKHOUSE_LOCAL -q "SELECT sipHash64(groupArray(id), groupArray(value)) FROM (SELECT * FROM file('$DATA_DIR/crosscheck.h5', 'HDF5', 'id Int32, value Float64') ORDER BY id SETTINGS input_format_hdf5_dataset = '/flat_compressed')" || echo FAIL)
+[ "$COMPRESSED_HASH" = "$COMPOUND_HASH" ] && echo "MATCH" || echo "MISMATCH: $COMPRESSED_HASH vs $COMPOUND_HASH"

@@ -126,3 +126,23 @@ BAD_ARGUMENTS
 BAD_ARGUMENTS
 --- Error: nonexistent dataset ---
 INCORRECT_DATA
+--- Shuffle + deflate filter ---
+Schema:
+id	Int32					
+value	Float64					
+Data:
+200	1	200	20100	1.5	300
+--- Big-endian contiguous (byte-swap) ---
+Schema:
+id	Int32					
+value	Float64					
+Data:
+100	1	100	5050	2.5	250
+--- Big-endian contiguous strided hyperslab ---
+25	1	49	625	2.5	122.5
+--- Big-endian + shuffle + deflate ---
+150	1	150	11325	3	450
+--- Cross-check: direct read (flat) vs H5Dread (compound) ---
+MATCH
+--- Cross-check: direct read (flat compressed) vs H5Dread (compound) ---
+MATCH
