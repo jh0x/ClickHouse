@@ -551,6 +551,7 @@ struct FormatSettings
     struct
     {
         String dataset = "/";
+        String user_files_path;
     } hdf5{};
 
     /// For capnProto format we should determine how to

@@ -14,6 +14,7 @@
 #include <Processors/Formats/Impl/HDF5BlockInputFormat.h>
 
 #include <base/scope_guard.h>
+#include <Common/filesystemHelpers.h>
 
 #include <algorithm>
 #include <bit>
@@ -33,6 +34,7 @@ namespace ErrorCodes
 {
 extern const int INCORRECT_DATA;
 extern const int BAD_ARGUMENTS;
+extern const int PATH_ACCESS_DENIED;
 }
 
 HDF5Handle::HDF5Handle(hid_t id_, herr_t (*closer_)(hid_t))
@@ -199,11 +201,13 @@ void validateTypeCompatibility(hid_t hdf5_type, const DataTypePtr & ch_type, con
             ch_type->getName());
 }
 
-String getFilePath(ReadBuffer & in)
+String getFilePath(ReadBuffer & in, const String & user_files_path)
 {
     String path = getFileNameFromReadBuffer(in);
     if (path.empty())
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "HDF5 format requires a local file path");
+    if (!user_files_path.empty() && !fileOrSymlinkPathStartsWith(path, user_files_path))
+        throw Exception(ErrorCodes::PATH_ACCESS_DENIED, "File '{}' is not inside '{}'", path, user_files_path);
     return path;
 }
 
@@ -381,8 +385,7 @@ ResolvedHyperslab resolveHyperslabParams(const HDF5HyperslabParams & params, hsi
 
 /// Helpers for reading without libhdf5 (--> no mutex)
 
-static constexpr H5T_order_t host_byte_order =
-    std::endian::native == std::endian::little ? H5T_ORDER_LE : H5T_ORDER_BE;
+static constexpr H5T_order_t host_byte_order = std::endian::native == std::endian::little ? H5T_ORDER_LE : H5T_ORDER_BE;
 
 template <typename T>
 void byteSwapTyped(std::span<char> data)
@@ -402,17 +405,10 @@ void byteSwapElements(std::span<char> data, size_t element_size)
     switch (element_size)
     {
         case 0:
-        case 1:
-            return;
-        case 2:
-            byteSwapTyped<UInt16>(data);
-            return;
-        case 4:
-            byteSwapTyped<UInt32>(data);
-            return;
-        case 8:
-            byteSwapTyped<UInt64>(data);
-            return;
+        case 1: return;
+        case 2: byteSwapTyped<UInt16>(data); return;
+        case 4: byteSwapTyped<UInt32>(data); return;
+        case 8: byteSwapTyped<UInt64>(data); return;
         default:
             size_t count = data.size() / element_size;
             for (size_t i = 0; i < count; ++i)
@@ -768,7 +764,7 @@ void HDF5SchemaReader::initialize()
         return;
     initialized = true;
 
-    String file_path = getFilePath(in);
+    String file_path = getFilePath(in, format_settings.hdf5.user_files_path);
 
     auto parsed = parseDatasetPath(format_settings.hdf5.dataset);
     const String & dataset_path = parsed.path;
@@ -1063,7 +1059,7 @@ void HDF5BlockInputFormat::prepareReader()
         return;
     reader_prepared = true;
 
-    String file_path = getFilePath(*in);
+    String file_path = getFilePath(*in, format_settings.hdf5.user_files_path);
 
     auto parsed = parseDatasetPath(format_settings.hdf5.dataset);
     const String & dataset_path = parsed.path;
