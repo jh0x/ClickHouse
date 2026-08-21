@@ -1,0 +1,350 @@
+=== Layouts ===
+--- Root-level 1D datasets, schema ---
+x	Int32					
+y	Float64					
+--- Root-level 1D datasets ---
+1	10.5
+2	20.5
+3	30.5
+--- Flat group of 1D datasets, schema ---
+x	Int32					
+y	Float64					
+--- Flat group of 1D datasets ---
+1	1.1
+2	2.2
+3	3.3
+4	4.4
+5	5.5
+--- Compound dataset, schema ---
+id	Int32					
+value	Float64					
+--- Compound dataset ---
+1	1.5
+2	2.5
+3	3.5
+--- Nested group ---
+10	1
+20	2
+30	3
+--- Single dataset named with a trailing slash, schema ---
+x	Int32					
+--- Single dataset named with a trailing slash ---
+1
+2
+3
+--- Column subset of a compound dataset ---
+1.5
+2.5
+3.5
+--- Column subset of a flat group ---
+1.1
+2.2
+3.3
+4.4
+5.5
+--- Empty dataset, schema ---
+x	Int32					
+y	Float64					
+--- Empty dataset ---
+0
+--- Large dataset spanning multiple batches ---
+70000	1	70000	2450035000
+=== Types ===
+--- Various numeric types, schema ---
+f32	Float32					
+f64	Float64					
+i8	Int8					
+u16	UInt16					
+--- Various numeric types ---
+1	1e-10	-128	0
+2	0	0	1000
+3	10000000000	127	65535
+--- Fixed-length strings, schema ---
+name	FixedString(10)					
+--- Fixed-length strings ---
+alice\0\0\0\0\0
+bob\0\0\0\0\0\0\0
+carol\0\0\0\0\0
+--- Variable-length strings, both charsets, schema ---
+label	String					
+name	String					
+value	Int32					
+--- Variable-length strings, both charsets ---
+hello	alpha	10
+ключ	beta	20
+	gamma	30
+--- Variable-length strings across batch boundaries ---
+8
+64
+200	4957	33
+--- ... and the rows on either side of a boundary are the right ones ---
+1	
+64	row-063-xxxxxxxxxxxx-ключ
+65	row-064-xxxxxxxxxxxxx-ключ
+128	row-127-xxxxxxxx-ключ
+129	row-128-xxxxxxxxx-ключ
+--- Variable-length strings under a strided hyperslab ---
+100	1	199	2471
+--- Variable-length strings under a blocked hyperslab ---
+[1,2,3,4,5,6,7,8,21,22,23,24,25,26,27,28,41,42,43,44,45,46,47,48,61,62,63,64,65,66,67,68,81,82,83,84,85,86,87,88]
+8
+16
+40	992
+--- Variable-length strings in a block wider than a batch, which keeps its offset ---
+5
+64
+197	4	200	row-003-xxx-ключ	4920
+--- Narrow-precision type: value does not fill its storage ---
+-3	3.5
+1	1.5
+2	-2.5
+1000	-4.5
+--- A type whose storage size and native size disagree, schema ---
+id	Int8					
+--- A type whose storage size and native size disagree ---
+-3
+1
+2
+100
+=== Compound datasets ===
+--- Members that need padding in the record, schema ---
+flag	UInt8					
+code	FixedString(3)					
+value	Float64					
+small	Int16					
+text	String					
+tag	String					
+id	Int32					
+--- Members that need padding in the record ---
+0	\0\0\0	0.25	-100		t0	1
+1	c01	0.5	-99	row-001-x-ключ		2
+63	c63	16	-37	row-063-xxxxxxxxxxxx-ключ	t11	64
+64	c64	16.25	-36	row-064-xxxxxxxxxxxxx-ключ	t12	65
+199	c05	50	99	row-199-xxxxxxxxxxxx-ключ	t4	200
+--- ... aggregated over every row ---
+200	19900	-100	5025	600	4957	443
+--- ... across a batch boundary ---
+8
+64
+200	4957	443
+--- ... and the rows on either side of it are the right ones ---
+64	c63	row-063-xxxxxxxxxxxx-ключ	t11
+65	c64	row-064-xxxxxxxxxxxxx-ключ	t12
+--- ... a subset of the members, reordered ---
+0.25	0	
+0.5	1	row-001-x-ключ
+0.75	2	row-002-xx-ключ
+--- ... a fixed-length and a variable-length member, reordered ---
+\0\0\0	t0
+c01	t0
+c07	t0
+--- ... a single member, which is read into the column directly ---
+200	5025
+200	4957
+--- ... under a strided hyperslab ---
+100	1	199	2500	2471
+--- ... under a blocked hyperslab ---
+8
+16
+[1,2,3,4,5,6,7,8,21,22,23,24,25,26,27,28,41,42,43,44,45,46,47,48,61,62,63,64,65,66,67,68,81,82,83,84,85,86,87,88]	445	992
+=== Filters, chunk cache and byte order ===
+--- Deflate, schema ---
+id	Int32					
+value	Float64					
+--- Deflate ---
+100	1	100	7575
+--- Shuffle + deflate ---
+200	1	200	20100	1.5	300
+--- Shuffle that degenerates to a no-op (1-byte elements, one element per chunk) ---
+[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]	[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+--- Filter: fletcher32 ---
+64	2016
+--- Filter: nbit ---
+64	2016
+--- Filter: scaleoffset ---
+64	2016
+--- Filter: unknown, recorded as optional and skipped ---
+64	2016
+--- ... and all of them together when the group is iterated ---
+fletcher32	Int32					
+nbit	Int32					
+scaleoffset	Int32					
+unknown	Int32					
+--- A filtered chunk larger than the default chunk cache, schema ---
+id	Int64					
+--- A filtered chunk larger than the default chunk cache ---
+100000	1	100000	5000050000
+--- ... in many small batches, all of them inside the one chunk ---
+1000
+100000	5000050000
+--- ... under a strided hyperslab ---
+100	1	99001	4950100
+--- ... and removing the chunk bound still reads it ---
+100000	5000050000
+--- A group of two oversized filtered chunks, both within the default budget ---
+id	Int64					
+value	Float64					
+100000	1	100000	5000050000	2500025000
+--- ... with a budget that fits one of the two chunks ---
+100000	1	100000	5000050000	2500025000
+--- ... in many small batches under that budget ---
+100000	5000050000	2500025000
+--- ... under a strided hyperslab and that budget ---
+100	1	99001	4950100	2475050
+--- ... reading only the column the budget did not reach ---
+100000	2500025000
+--- ... and removing the bound gives both chunks a cache ---
+100000	5000050000	2500025000
+--- Big-endian contiguous, schema ---
+id	Int32					
+value	Float64					
+--- Big-endian contiguous ---
+100	1	100	5050	2.5	250
+--- Big-endian contiguous strided hyperslab ---
+25	1	49	625	2.5	122.5
+--- Big-endian + shuffle + deflate ---
+150	1	150	11325	3	450
+=== Hyperslabs and block size ===
+--- Start only ---
+3	3.3
+4	4.4
+5	5.5
+--- Start + count + block ---
+2	2.2
+3	3.3
+--- Stride on a large dataset ---
+100	1	199
+--- Negative start ---
+4	4.4
+5	5.5
+--- Cross-batch boundary ---
+68000	1	68000
+--- Compound dataset ---
+1	1.5
+2	2.5
+--- Empty brackets (identity) ---
+70000
+--- All defaults (identity) ---
+70000
+--- Adjacent blocks (stride = block) ---
+[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+--- One block has no stride between blocks, so a stride below it is not an overlap ---
+[2,3,4]
+[2,3,4]
+--- Count only: blocks cover the extent ---
+[1,2,3,4]
+--- Count only, from a nonzero start ---
+[2,3,4,5]
+--- Count only, extent not divisible by count, so the tail is dropped ---
+69999	1	69999
+--- A block wider than a batch is split across batches ---
+4464
+65536
+--- A block starting past zero is split too, and keeps its offset ---
+4457
+65536
+69993	8	70000
+--- input_format_hdf5_max_block_size sets the number of rows per chunk ---
+10000
+30000
+--- ... and applies to a block wider than a batch as well ---
+10000
+30000
+=== Neither the batch size nor the hyperslab changes what is read ===
+--- A standalone variable-length string dataset, in small batches ---
+1
+--- ... under a strided hyperslab ---
+1
+--- ... in a block wider than a batch, against the whole dataset ---
+1
+--- A compound dataset, in small batches ---
+1
+--- ... under a strided hyperslab ---
+1
+--- A block covering the whole dataset is the identity selection ---
+1
+--- A large dataset in batches of 7 ---
+1
+--- A narrow-precision type decodes to the same values as the standard one ---
+1
+=== Links, and the settings that do not apply to a local file ===
+--- External link: the rest of its group is readable ---
+1
+2
+3
+--- External link in a group that is iterated: skipped, not fatal ---
+1
+2
+3
+--- Soft link inside the file is followed, schema ---
+own	Int32					
+resolved	Int32					
+--- Soft link inside the file is followed ---
+1	1
+2	2
+3	3
+--- Dangling soft link: the rest of its group is readable when named ---
+1
+2
+3
+--- Dangling soft links in a group that is iterated: skipped, not fatal ---
+own	Int32					
+--- ... and the same when the group is read ---
+1
+2
+3
+--- The datasets refused by a tight chunk limit read fine at the default one ---
+100	7575
+200	20100
+30	900
+--- Zero removes the chunk limit ---
+100	7575
+--- A local file is read by path, so the seek settings do not apply to it ---
+1	1.1
+2	2.2
+3	3.3
+4	4.4
+5	5.5
+--- ... including a compressed dataset ---
+100	1	100	7575
+=== Schema cache ===
+--- Different datasets of one file ---
+x	Int32					
+y	Float64					
+f32	Float32					
+f64	Float64					
+i8	Int8					
+u16	UInt16					
+x	Int32					
+y	Float64					
+--- Same schema, different hyperslab ---
+70000
+100
+70000
+=== Counting without reading ===
+--- The whole dataset ---
+70000
+70000
+--- A strided hyperslab counts the selection, not the dataset ---
+100
+100
+--- ... and so does a block wider than one batch ---
+69993
+69993
+--- An empty dataset ---
+0
+0
+=== The environment cannot redirect a read ===
+--- HDF5_PLUGIN_PATH does not change the result ---
+64	2016
+--- HDF5_VOL_CONNECTOR cannot redirect the read ---
+1	10.5
+2	20.5
+3	30.5
+--- HDF5_DRIVER cannot replace the file driver ---
+1	10.5
+2	20.5
+3	30.5
+=== Concurrency ===
+70308	2450062150	1225055221
+70308	2450062150	1225055221

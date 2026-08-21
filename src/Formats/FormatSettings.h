@@ -23,6 +23,8 @@ namespace DB
   */
 struct FormatSettings
 {
+    bool is_clickhouse_local = false;
+
     bool skip_unknown_fields = false;
     bool with_names_use_header = false;
     bool with_types_use_header = false;
@@ -582,6 +584,14 @@ struct FormatSettings
         double output_dictionary_key_size_threshold = 0.0;
         UInt64 output_compression_block_size = 256 * 1024; /// 256 KiB
     } orc{};
+
+    struct
+    {
+        String dataset = "/";
+        UInt64 max_chunk_size = 268435456; /// 256 MiB
+        UInt64 max_block_size = DEFAULT_BLOCK_SIZE;
+        bool allow_experimental = false;
+    } hdf5{};
 
     /// For capnProto format we should determine how to
     /// compare ClickHouse Enum and Enum from schema.

@@ -1,0 +1,59 @@
+=== Errors: hyperslabs ===
+out of range: BAD_ARGUMENTS
+size overflows: count(4611686018427387904) * block(12) overflows
+end overflows: stride(9223372036854775807) + block(4) overflows
+malformed: BAD_ARGUMENTS
+parameter above Int64 max: it must fit into Int64
+multi-dimensional: BAD_ARGUMENTS
+overlapping blocks: so the blocks overlap, which is not supported
+zero block size: BAD_ARGUMENTS
+=== Errors: unsupported shapes and types ===
+2D dataset: has 2 dimensions
+nested compound type: Nested HDF5 compound types are not supported
+compound dataset in a named group: Set 'input_format_hdf5_dataset' to '/compound/data'
+compound dataset at the root: Set 'input_format_hdf5_dataset' to '/compound'
+unsupported type (enum): NOT_IMPLEMENTED
+empty group: BAD_ARGUMENTS
+nonexistent dataset: Cannot resolve the HDF5 path '/nonexistent' from 'input_format_hdf5_dataset'
+column not found in a compound dataset: BAD_ARGUMENTS
+column not found in a group: Column 'nonexistent' not found in HDF5 group '/flat'
+group member that is not a dataset: Cannot open the HDF5 dataset 'group'
+Int32 dataset read as Int8: BAD_ARGUMENTS
+fixed-length member at the wrong width: file has FixedString(3) but query expects FixedString(4)
+single dataset, more than one column asked for: maps to exactly one column
+single dataset named as a different column: Column 'not_x' not found in HDF5 dataset '/x'
+group whose datasets disagree on length: HDF5 datasets in group have different lengths: 0 vs 5
+=== Errors: files named by the file being read ===
+external link, named: does not follow external links
+external link, wanted as a column: does not follow external links
+dangling soft link, named: Cannot resolve the HDF5 path '/links/dangling/dangling'
+external data file, named: does not open external data files
+external data file, group iterated: does not open external data files
+virtual dataset over another file: is a virtual dataset
+virtual dataset over a dataset of this file: is a virtual dataset
+=== Errors: memory limits ===
+chunk over the limit: is over 'input_format_hdf5_max_chunk_size' (16)
+chunk over the limit, larger dataset: is over 'input_format_hdf5_max_chunk_size' (1048576)
+chunk dimension that does not fit the element size: chunk dimension 2305843009213693952 is too large for the element size 8
+=== Errors: the input has to be a plain local file ===
+compressed input, the same file as .h5.gz: reads a regular local file directly
+input piped on stdin: reads a regular local file directly
+--- A file locked by another process is still readable ---
+1	10.5
+2	20.5
+3	30.5
+=== Errors: only when the experimental setting is enabled ===
+detected from the extension: Set `allow_experimental_hdf5_format = 1` to enable it
+structure given, so inference is skipped: The HDF5 format is experimental
+=== Errors: only in clickhouse-local ===
+detected from the extension: The HDF5 format is only available in clickhouse-local
+structure given, so inference is skipped: The HDF5 format is only available in clickhouse-local
+=== Malformed files ===
+--- Reading the root group of every mutant ---
+logical errors: 0
+at least one mutant reported: 1
+--- Reading the filtered datasets of every mutant ---
+logical errors: 0
+at least one mutant reported: 1
+an empty file: the file is empty
+a file that is not HDF5 at all: Cannot open HDF5 file

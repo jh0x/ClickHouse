@@ -253,6 +253,31 @@ The time zone name for ORC row reader, the default ORC row reader's time zone is
     DECLARE(Bool, input_format_orc_dictionary_as_low_cardinality, true, R"(
 Treat ORC dictionary encoded columns as LowCardinality columns while reading ORC files.
 )", 0) \
+    DECLARE(String, input_format_hdf5_dataset, "/", R"(
+Dataset or group path within an HDF5 file, optionally with HDFql-style hyperslab notation [start:stride:count:block]. When pointing at a group, each child 1D dataset becomes a column. When pointing at a compound dataset, each field becomes a column. Example: '/data[100:2:500:1]' selects 500 elements starting at index 100 with stride 2.
+
+Omitted hyperslab parameters are resolved in the order `start` = 0, `count` = 1, `block` = (dim - start) / count, `stride` = block, so blocks are adjacent by default and a spec that names only `count` splits the rest of the dataset into that many adjacent blocks rather than taking `count` single elements.
+)", 0) \
+    DECLARE(UInt64, input_format_hdf5_max_chunk_size, 268435456, R"(
+The largest decompressed chunk size, in bytes, that a chunked HDF5 dataset may declare; a dataset
+declaring more is refused before any of its data is read. Zero means unlimited.
+
+The same number also bounds the total chunk cache the reader requests while reading one file, so a
+group of many compressed datasets cannot multiply it by the number of columns. A dataset whose chunk
+does not fit in the remaining budget keeps the 8 MiB cache `libhdf5` provides by default, which only
+makes it slower.
+
+`libhdf5` allocates that cache, the compressed chunk length recorded in the file, and the `deflate`
+output buffer it grows until the stream ends, all with plain `malloc` and outside `max_memory_usage`.
+)", 0) \
+    DECLARE(NonZeroUInt64, input_format_hdf5_max_block_size, DEFAULT_BLOCK_SIZE, R"(
+Max block size, in rows, for the HDF5 reader.
+
+This bounds rows, not bytes: one batch costs this many rows times the width of a row, so a wide
+`FixedString` column makes a batch correspondingly larger. Unlike the chunk buffer bounded by
+`input_format_hdf5_max_chunk_size`, that memory is allocated by ClickHouse and counts towards
+`max_memory_usage`.
+)", 0) \
     DECLARE(Bool, input_format_parquet_allow_missing_columns, true, R"(
 Allow missing columns while reading Parquet input formats
 )", 0) \

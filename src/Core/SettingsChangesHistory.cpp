@@ -51,6 +51,10 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"query_plan_optimize_join_order_conflict_detector", "", "", "New setting selecting the conflict detector that decides join reordering validity in the DPsub join order algorithm: `a` for the (correct but incomplete) CD-A, `c` for the (correct and complete) CD-C, empty for none."},
             {"use_text_index_postings_cache", false, true, "Enabled the text index posting lists cache globally. Previously each query used a small private cache, which caused posting lists and phrase search results to be recomputed within a single query on large tables."},
             {"output_format_arrow_unsupported_types", "binary", "binary", "New setting superseding `output_format_arrow_unsupported_types_as_binary`, adding a `text` mode. Its default matches the previous behavior, so `compatibility` must not change it."},
+            {"input_format_hdf5_dataset", "/", "/", "New setting to specify the dataset or group path within an HDF5 file for the HDF5 input format."},
+            {"input_format_hdf5_max_chunk_size", 268435456, 268435456, "New setting to bound the size of a single decompressed chunk of a chunked HDF5 dataset."},
+            {"input_format_hdf5_max_block_size", DEFAULT_BLOCK_SIZE, DEFAULT_BLOCK_SIZE, "New setting to control the number of rows in a block produced by the HDF5 input format."},
+            {"allow_experimental_hdf5_format", false, false, "New setting to enable the experimental HDF5 input format."},
         });
         addSettingsChanges(settings_changes_history, "26.9",
         {

@@ -55,6 +55,7 @@ FORMAT_FACTORY_SETTINGS(DECLARE_FORMAT_EXTERN, INITIALIZE_SETTING_EXTERN)
     extern const SettingsAggregateFunctionInputFormat aggregate_function_input_format;
     extern const SettingsBool allow_special_serialization_kinds_in_output_formats;
     extern const SettingsBool enable_nullable_tuple_type;
+    extern const SettingsBool allow_experimental_hdf5_format;
 
     extern SettingsGeoJSONUnsupportedGeometryHandling input_format_geojson_unsupported_geometry_handling;
     extern SettingsBool format_geojson_validate_geometry;
@@ -332,6 +333,7 @@ FormatSettings getFormatSettings(const ContextPtr & context, const Settings & se
     format_settings.schema.format_schema_message_name = settings[Setting::format_schema_message_name];
     format_settings.schema.format_schema_path = context->getFormatSchemaPath();
     format_settings.schema.is_server = context->hasGlobalContext() && (context->getGlobalContext()->getApplicationType() == Context::ApplicationType::SERVER);
+    format_settings.is_clickhouse_local = context->hasGlobalContext() && (context->getGlobalContext()->getApplicationType() == Context::ApplicationType::LOCAL);
     format_settings.schema.output_format_schema = settings[Setting::output_format_schema];
     format_settings.skip_unknown_fields = settings[Setting::input_format_skip_unknown_fields];
     format_settings.template_settings.resultset_format = settings[Setting::format_template_resultset];
@@ -384,6 +386,10 @@ FormatSettings getFormatSettings(const ContextPtr & context, const Settings & se
     format_settings.orc.filter_push_down = settings[Setting::input_format_orc_filter_push_down];
     format_settings.orc.reader_time_zone_name = settings[Setting::input_format_orc_reader_time_zone_name];
     format_settings.orc.writer_time_zone_name = settings[Setting::output_format_orc_writer_time_zone_name];
+    format_settings.hdf5.dataset = settings[Setting::input_format_hdf5_dataset];
+    format_settings.hdf5.max_chunk_size = settings[Setting::input_format_hdf5_max_chunk_size];
+    format_settings.hdf5.max_block_size = settings[Setting::input_format_hdf5_max_block_size];
+    format_settings.hdf5.allow_experimental = settings[Setting::allow_experimental_hdf5_format];
     format_settings.defaults_for_omitted_fields = settings[Setting::input_format_defaults_for_omitted_fields];
     format_settings.capn_proto.enum_comparing_mode = settings[Setting::format_capn_proto_enum_comparising_mode];
     format_settings.capn_proto.skip_fields_with_unsupported_types_in_schema_inference = settings[Setting::input_format_capn_proto_skip_fields_with_unsupported_types_in_schema_inference];

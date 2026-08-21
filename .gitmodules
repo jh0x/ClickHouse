@@ -465,3 +465,6 @@
 [submodule "contrib/spdlog"]
 	path = contrib/spdlog
 	url = https://github.com/gabime/spdlog.git
+[submodule "contrib/hdf5"]
+	path = contrib/hdf5
+	url = https://github.com/HDFGroup/hdf5.git

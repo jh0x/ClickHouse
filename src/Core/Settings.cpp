@@ -9506,6 +9506,9 @@ Maximum number of WebAssembly UDF instances that can run in parallel per functio
     DECLARE(Bool, allow_experimental_eval_table_function, false, R"(
 Enable experimental table function `eval`.
 )", EXPERIMENTAL) \
+    DECLARE(Bool, allow_experimental_hdf5_format, false, R"(
+Enable the experimental `HDF5` input format. Reading an HDF5 file hands it to `libhdf5`, which decodes the whole object header, B-tree and dataspace structure of the file before any of ClickHouse's own checks can run. The format is additionally only available in `clickhouse-local`.
+)", EXPERIMENTAL) \
     \
     /* ####################################################### */ \
     /* ############ END OF EXPERIMENTAL FEATURES ############# */ \
